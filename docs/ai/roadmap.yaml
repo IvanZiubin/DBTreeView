@@ -50,3 +50,35 @@ stages:
       - "Edge case: edits under a deleted ancestor are handled consistently"
       - Final README.md with one-command start, schema explanation and key decisions
       - All tests green
+
+  - id: 5
+    name: ui-update
+    depends_on: [4]   # restyles the full stage 4 feature set; no new backend behaviour
+    goal: Restyle the UI to the "Industry" design from the claude.ai design project, keeping all stage 2–4 behaviour.
+    design_reference:
+      source: https://claude.ai/design/p/c4013fb1-0341-440b-b446-4f41f68fe51a?file=Tree+Editor.dc.html
+      local_copy: docs/design/stage-5/   # README.md (anatomy + rules), tree-editor.dc.html (mock), industry-styles.css (tokens)
+    scope:
+      in:
+        - Industry tokens + component classes as the global stylesheet (Barlow / Barlow Condensed, steel accent, square blueprint frames with corner marks)
+        - Header bar with brand and Reset; DB and Cache panels as blueprint sections; transfer gutter between them
+        - Hairline tree rows (guides per depth, chevrons, leaf dot, '#id', cached marker, state tags new / edited / to delete / deleted)
+        - Inline value editor in the cache row (Enter / Escape / blur)
+        - Load into cache via button, double-click and drag-and-drop onto the cache panel
+        - SVG link lines between a DB row and its cached copy
+        - Collapsible network log of real API calls (method, path, status, duration)
+        - Blueprint toasts; Apply dialog with itemised pending changes; Reset confirmation dialog
+        - Motion from the mock (fly-in on load, FLIP on re-parent, flash tags) honouring prefers-reduced-motion
+      out:
+        - Row-style switcher (hairline / ledger / cells) — design-exploration control; ship hairline only
+        - Simulated latency and the mock's in-memory API — the real API is used
+        - Backend or API contract changes
+    definition_of_done:
+      - Frontend visually matches docs/design/stage-5 (layout, tokens, typography, blueprint frames, tags, dialogs, toasts, network log)
+      - All colors / fonts / spacing come from Industry tokens; PrimeVue Aura look removed or fully overridden (frontend-architect decides and records it)
+      - Every stage 2–4 DoD item still holds (lazy DB tree, hierarchy assembly, pending edits / adds / deletes until Apply, cascade, temp-id mapping, Reset)
+      - Edit / Add child / Delete disabled for deleted and pending-delete nodes; Apply disabled with no pending changes
+      - Drag-and-drop, double-click and button load all go through the single load-node API call
+      - Network log lists every API request issued by the UI with status and duration
+      - Keyboard focus uses the accent focus-visible ring; layout works down to 1024px wide
+      - frontend/CLAUDE.md and README.md updated (design source, styling approach); `npm run build` and all tests green

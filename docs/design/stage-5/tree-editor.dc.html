@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="_ds/industry-7d9b8ab1-b520-4055-b0ca-42e53b2ad5eb/styles.css">
+<script src="_ds/industry-7d9b8ab1-b520-4055-b0ca-42e53b2ad5eb/_ds_bundle.js"></script>
+<style>
+html,body{margin:0;height:100%}
+a{color:var(--color-accent-700)}a:hover{color:var(--color-accent-900)}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes pulse{0%,100%{opacity:.35}50%{opacity:1}}
+@keyframes nudge{0%,100%{transform:translateX(0)}50%{transform:translateX(6px)}}
+</style>
+</helmet>
+<div ref="{{ rootRef }}" style="height:100vh;display:flex;flex-direction:column;background:var(--color-bg);color:var(--color-text);font-family:var(--font-body);position:relative;overflow:hidden">
+
+  <header class="nav" style="border-bottom:1px solid var(--color-divider);padding:10px 20px;flex:none">
+    <div class="nav-brand" style="display:flex;align-items:center;gap:8px;font-size:20px">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="color:var(--color-accent)"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M3 5V19A9 3 0 0 0 21 19V5"></path><path d="M3 12A9 3 0 0 0 21 12"></path></svg>
+      Tree Editor
+    </div>
+    <div style="display:flex;align-items:center;gap:8px">
+      <span style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--color-neutral-700)">Row style</span>
+      <div class="seg">
+        <sc-for list="{{ segOpts }}" as="o" hint-placeholder-count="3">
+          <button onClick="{{ o.onClick }}" style="{{ o.style }}"><span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;opacity:.7">{{ o.id }}</span>{{ o.label }}</button>
+        </sc-for>
+      </div>
+    </div>
+    <button class="btn btn-secondary" onClick="{{ askReset }}" disabled="{{ resetting }}" style="font-size:13px;padding:5px 10px">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="{{ resetIconStyle }}"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"></path><path d="M8 16H3v5"></path></svg>
+      Reset
+    </button>
+  </header>
+
+  <main ref="{{ mainRef }}" style="flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) 150px minmax(0,1fr);grid-template-rows:minmax(0,1fr);padding:22px 22px 18px;position:relative">
+
+    <section class="blueprint" data-screen-label="DBTreeView" style="display:flex;flex-direction:column;min-height:0;min-width:0">
+      <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:12px 14px;border-bottom:1px solid var(--color-divider)">
+        <div style="display:flex;flex-direction:column;gap:2px">
+          <span class="card-kicker" style="color:var(--color-accent-700)">DBTreeView</span>
+          <h3 style="margin:0;font-size:22px">Database</h3>
+        </div>
+        <button class="btn btn-primary blueprint" onClick="{{ loadSelected }}" disabled="{{ loadDisabled }}" style="font-size:13px;padding:5px 10px">
+          <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+          <sc-if value="{{ loadingCache }}" hint-placeholder-val="{{ false }}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" style="animation:spin .8s linear infinite"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg></sc-if>
+          <sc-if value="{{ notLoadingCache }}" hint-placeholder-val="{{ true }}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" x2="12" y1="15" y2="3"></line></svg></sc-if>
+          Load into cache
+        </button>
+      </div>
+      <div ref="{{ dbBodyRef }}" onScroll="{{ onScroll }}" style="flex:1;overflow:auto;padding:8px">
+        <sc-if value="{{ rootsLoading }}" hint-placeholder-val="{{ true }}">
+          <div style="display:flex;align-items:center;gap:8px;padding:10px 6px;color:var(--color-neutral-700);font-size:13px">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" style="animation:spin .8s linear infinite"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>
+            Loading roots <span style="font-family:ui-monospace,Menlo,monospace;font-size:11px">GET /api/nodes/roots</span>
+          </div>
+        </sc-if>
+        <sc-for list="{{ dbRows }}" as="row" hint-placeholder-count="0">
+          <div data-db-row="{{ row.key }}" draggable="true" onClick="{{ row.onClick }}" onDoubleClick="{{ row.onDblClick }}" onMouseEnter="{{ row.onEnter }}" onMouseLeave="{{ row.onLeave }}" onDragStart="{{ row.onDragStart }}" onDragEnd="{{ row.onDragEnd }}" style="{{ row.style }}">
+            <span style="{{ row.idLeftStyle }}">{{ row.idLabel }}</span>
+            <span style="{{ row.guideStyle }}"></span>
+            <sc-if value="{{ row.hasToggle }}">
+              <button onClick="{{ row.onToggle }}" title="Expand" style="width:18px;height:18px;display:grid;place-items:center;border:0;background:transparent;padding:0;cursor:pointer;color:inherit;flex:none">
+                <sc-if value="{{ row.loading }}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent)" stroke-width="1.8" stroke-linecap="round" style="animation:spin .8s linear infinite;display:block"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg></sc-if>
+                <sc-if value="{{ row.notLoading }}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="{{ row.chevStyle }}"><path d="m9 18 6-6-6-6"></path></svg></sc-if>
+              </button>
+            </sc-if>
+            <sc-if value="{{ row.isLeaf }}"><span style="width:18px;flex:none;display:grid;place-items:center"><span style="width:3px;height:3px;background:var(--color-neutral-400)"></span></span></sc-if>
+            <span data-val="1" style="{{ row.valueStyle }}">{{ row.value }}</span>
+            <sc-for list="{{ row.badges }}" as="b"><span class="{{ b.cls }}" style="padding:1px 6px;font-size:10.5px;flex:none">{{ b.label }}</span></sc-for>
+            <span style="flex:1"></span>
+            <span style="{{ row.idRightStyle }}">{{ row.idLabel }}</span>
+            <sc-if value="{{ row.cached }}"><span title="In cache" style="width:7px;height:7px;background:var(--color-accent);flex:none;margin-left:6px"></span></sc-if>
+          </div>
+        </sc-for>
+        <sc-if value="{{ dbEmpty }}" hint-placeholder-val="{{ false }}"><p style="margin:1rem;color:var(--color-neutral-700)">No nodes in the database.</p></sc-if>
+      </div>
+    </section>
+
+    <div style="position:relative;min-height:0">
+      <div style="position:absolute;left:14px;right:14px;bottom:0;z-index:2;display:flex;flex-direction:column;gap:8px">
+        <sc-if value="{{ dragging }}" hint-placeholder-val="{{ false }}">
+          <div class="blueprint" style="padding:10px;background:var(--color-bg);display:flex;flex-direction:column;gap:6px;align-items:flex-start">
+            <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+            <span class="card-kicker" style="color:var(--color-accent-700)">Dragging</span>
+            <span style="font-size:13px;font-weight:500">{{ dragLabel }}</span>
+            <svg width="26" height="14" viewBox="0 0 26 14" fill="none" stroke="var(--color-accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="animation:nudge 1s ease-in-out infinite"><path d="M1 7h23"></path><path d="m18 1 6 6-6 6"></path></svg>
+            <span style="font-size:11px;color:var(--color-neutral-700)">Drop on Cache</span>
+          </div>
+        </sc-if>
+        <sc-if value="{{ showTransfer }}" hint-placeholder-val="{{ false }}">
+          <div class="blueprint" style="padding:10px;background:var(--color-bg);display:flex;flex-direction:column;gap:4px">
+            <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+            <span class="card-kicker" style="color:var(--color-accent-700)">{{ transferKicker }}</span>
+            <span style="font-size:13px;font-weight:500;line-height:1.3">{{ transferLabel }}</span>
+            <span style="font-family:ui-monospace,Menlo,monospace;font-size:10.5px;color:var(--color-neutral-700);word-break:break-all">{{ transferPath }}</span>
+            <span style="font-family:ui-monospace,Menlo,monospace;font-size:10.5px;color:var(--color-accent-700)">{{ transferStatus }}</span>
+          </div>
+        </sc-if>
+        <sc-if value="{{ showHint }}" hint-placeholder-val="{{ true }}">
+          <p style="margin:0 0 4px;font-size:12px;line-height:1.45;color:var(--color-neutral-700);text-wrap:pretty">Select a node and load it, double-click it, or drag it across to the cache.</p>
+        </sc-if>
+      </div>
+    </div>
+
+    <section class="blueprint" data-screen-label="CachedTreeView" onDragOver="{{ cacheDragOver }}" onDragLeave="{{ cacheDragLeave }}" onDrop="{{ cacheDrop }}" style="display:flex;flex-direction:column;min-height:0;min-width:0">
+      <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:12px 14px;border-bottom:1px solid var(--color-divider)">
+        <div style="display:flex;flex-direction:column;gap:2px">
+          <span class="card-kicker" style="color:var(--color-accent-700)">CachedTreeView</span>
+          <h3 style="margin:0;font-size:22px">Cache</h3>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn btn-secondary" onClick="{{ startEditSel }}" disabled="{{ editDisabled }}" style="font-size:13px;padding:5px 10px">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"></path></svg>Edit
+          </button>
+          <button class="btn btn-secondary" onClick="{{ addChild }}" disabled="{{ editDisabled }}" style="font-size:13px;padding:5px 10px">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"></path><path d="M12 5v14"></path></svg>Add child
+          </button>
+          <button class="btn btn-secondary" onClick="{{ deleteSel }}" disabled="{{ editDisabled }}" style="font-size:13px;padding:5px 10px">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg>Delete
+          </button>
+          <button class="btn btn-primary blueprint" onClick="{{ askApply }}" disabled="{{ applyDisabled }}" style="font-size:13px;padding:5px 10px">
+            <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="{{ applyIconStyle }}"><path d="M20 6 9 17l-5-5"></path></svg>Apply
+          </button>
+        </div>
+      </div>
+      <div ref="{{ cacheBodyRef }}" onScroll="{{ onScroll }}" style="flex:1;overflow:auto;padding:8px;position:relative">
+        <sc-if value="{{ cacheEmpty }}" hint-placeholder-val="{{ true }}">
+          <p style="margin:1rem;color:var(--color-neutral-700)">The cache is empty. Select a node in the database tree and click “Load into cache”.</p>
+        </sc-if>
+        <sc-for list="{{ cacheRows }}" as="row" hint-placeholder-count="0">
+          <div data-cache-row="{{ row.key }}" onClick="{{ row.onClick }}" onDoubleClick="{{ row.onDblClick }}" onMouseEnter="{{ row.onEnter }}" onMouseLeave="{{ row.onLeave }}" style="{{ row.style }}">
+            <span style="{{ row.idLeftStyle }}">{{ row.idLabel }}</span>
+            <span style="{{ row.guideStyle }}"></span>
+            <sc-if value="{{ row.hasToggle }}">
+              <button onClick="{{ row.onToggle }}" title="Collapse" style="width:18px;height:18px;display:grid;place-items:center;border:0;background:transparent;padding:0;cursor:pointer;color:inherit;flex:none">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="{{ row.chevStyle }}"><path d="m9 18 6-6-6-6"></path></svg>
+              </button>
+            </sc-if>
+            <sc-if value="{{ row.isLeaf }}"><span style="width:18px;flex:none;display:grid;place-items:center"><span style="width:3px;height:3px;background:var(--color-neutral-400)"></span></span></sc-if>
+            <sc-if value="{{ row.editing }}">
+              <input data-edit-input="1" class="input" value="{{ draft }}" onChange="{{ onDraft }}" onKeyDown="{{ onEditKey }}" onBlur="{{ commitEdit }}" onClick="{{ stop }}" style="min-height:0;height:24px;padding:2px 6px;font-size:13px;width:220px;max-width:60%;background:var(--color-bg);border-color:var(--color-accent)">
+            </sc-if>
+            <sc-if value="{{ row.notEditing }}"><span data-val="1" style="{{ row.valueStyle }}">{{ row.value }}</span></sc-if>
+            <sc-for list="{{ row.badges }}" as="b"><span class="{{ b.cls }}" style="padding:1px 6px;font-size:10.5px;flex:none">{{ b.label }}</span></sc-for>
+            <span style="flex:1"></span>
+            <span style="font-family:ui-monospace,Menlo,monospace;font-size:10.5px;color:var(--color-neutral-500);flex:none">{{ row.parentHint }}</span>
+            <span style="{{ row.idRightStyle }}">{{ row.idLabel }}</span>
+          </div>
+        </sc-for>
+      </div>
+      <sc-if value="{{ dragOver }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;inset:66px 10px 10px;border:1.5px dashed var(--color-accent);background:color-mix(in srgb, var(--color-accent) 8%, var(--color-bg));display:grid;place-items:center;pointer-events:none;z-index:3">
+          <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" x2="12" y1="15" y2="3"></line></svg>
+            <span style="font-family:var(--font-heading);font-weight:600;font-size:18px;color:var(--color-accent-800)">Drop to load</span>
+            <span style="font-size:13px;color:var(--color-accent-800)">{{ dragLabel }}</span>
+          </div>
+        </div>
+      </sc-if>
+    </section>
+
+    {{ linesSvg }}
+  </main>
+
+  <div style="flex:none;border-top:1px solid var(--color-divider)">
+    <button onClick="{{ toggleLog }}" style="width:100%;display:flex;align-items:center;gap:10px;padding:8px 22px;background:transparent;border:0;cursor:pointer;font:inherit;color:inherit;text-align:left">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
+      <span style="font-family:var(--font-heading);font-weight:600;font-size:15px">Network log</span>
+      <span class="tag tag-neutral" style="padding:1px 7px">{{ logCountLabel }}</span>
+      <sc-if value="{{ hasPendingReq }}" hint-placeholder-val="{{ false }}"><span style="width:6px;height:6px;background:var(--color-accent);animation:pulse 1s ease-in-out infinite"></span></sc-if>
+      <span style="font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--color-neutral-700);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">{{ lastLogText }}</span>
+      <span style="flex:1"></span>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="{{ logChevStyle }}"><path d="m18 15-6-6-6 6"></path></svg>
+    </button>
+    <sc-if value="{{ logOpen }}" hint-placeholder-val="{{ false }}">
+      <div style="max-height:min(220px, 30vh);overflow:auto;padding:0 22px 12px">
+        <div style="display:grid;grid-template-columns:80px 56px minmax(0,1fr) 70px 70px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--color-neutral-700);padding:6px 0;border-bottom:1px solid var(--color-divider);position:sticky;top:0;background:var(--color-bg)">
+          <span>Time</span><span>Method</span><span>Path</span><span>Status</span><span style="text-align:right">Duration</span>
+        </div>
+        <sc-for list="{{ logRows }}" as="e" hint-placeholder-count="0">
+          <div style="display:grid;grid-template-columns:80px 56px minmax(0,1fr) 70px 70px;align-items:center;font-family:ui-monospace,Menlo,monospace;font-size:12px;padding:5px 0;border-bottom:1px solid color-mix(in srgb, var(--color-text) 8%, transparent)">
+            <span style="color:var(--color-neutral-600)">{{ e.time }}</span>
+            <span style="color:var(--color-accent-700)">{{ e.method }}</span>
+            <span>{{ e.path }}</span>
+            <span><span class="{{ e.statusCls }}" style="padding:0 6px;font-size:10.5px">{{ e.statusLabel }}</span></span>
+            <span style="text-align:right;color:var(--color-neutral-600)">{{ e.msLabel }}</span>
+          </div>
+        </sc-for>
+        <sc-if value="{{ logEmpty }}" hint-placeholder-val="{{ false }}"><p style="margin:10px 0 0;font-size:13px;color:var(--color-neutral-700)">No requests yet.</p></sc-if>
+      </div>
+    </sc-if>
+  </div>
+
+  <div style="position:absolute;top:62px;right:20px;display:flex;flex-direction:column;gap:12px;z-index:40;width:320px;pointer-events:none">
+    <sc-for list="{{ toasts }}" as="t" hint-placeholder-count="0">
+      <div class="blueprint" style="background:var(--color-bg);box-shadow:var(--shadow-md);padding:10px 12px;display:flex;flex-direction:column;gap:2px;pointer-events:auto">
+        <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+        <span class="card-kicker" style="color:var(--color-accent-700)">{{ t.severity }}</span>
+        <span style="font-family:var(--font-heading);font-weight:600;font-size:16px">{{ t.summary }}</span>
+        <span style="font-size:13px;color:var(--color-neutral-800)">{{ t.detail }}</span>
+      </div>
+    </sc-for>
+  </div>
+
+  <sc-if value="{{ dialogApply }}" hint-placeholder-val="{{ false }}">
+    <div class="dialog-backdrop" onClick="{{ closeDialog }}" style="z-index:50">
+      <div class="dialog blueprint" onClick="{{ stop }}" style="background:var(--color-bg);width:min(540px,100%)">
+        <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+        <div class="dialog-title">Apply changes</div>
+        <div class="dialog-body">{{ applySummary }}</div>
+        <div style="display:flex;flex-direction:column;border-top:1px solid var(--color-divider);max-height:280px;overflow:auto">
+          <sc-for list="{{ applyItems }}" as="it" hint-placeholder-count="2">
+            <div style="display:grid;grid-template-columns:64px minmax(0,1fr);gap:10px;align-items:center;padding:7px 0;border-bottom:1px solid color-mix(in srgb, var(--color-text) 8%, transparent);font-size:14px">
+              <span class="{{ it.cls }}" style="padding:1px 6px;font-size:10.5px;justify-self:start">{{ it.tag }}</span>
+              <span>{{ it.text }}</span>
+            </div>
+          </sc-for>
+        </div>
+        <sc-if value="{{ hasDeletes }}" hint-placeholder-val="{{ false }}"><p style="margin:0;font-size:12.5px;color:var(--color-neutral-700)">Deleting also deletes all descendants in the database, including ones that were never loaded.</p></sc-if>
+        <div class="dialog-actions">
+          <button class="btn btn-secondary" onClick="{{ closeDialog }}">Cancel</button>
+          <button class="btn btn-primary blueprint" onClick="{{ confirmApply }}"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>Apply</button>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ dialogReset }}" hint-placeholder-val="{{ false }}">
+    <div class="dialog-backdrop" onClick="{{ closeDialog }}" style="z-index:50">
+      <div class="dialog blueprint" onClick="{{ stop }}" style="background:var(--color-bg)">
+        <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+        <div class="dialog-title">Reset database</div>
+        <div class="dialog-body">Restore the database to the initial sample data and clear the cache? Unapplied cache changes will be lost.</div>
+        <div class="dialog-actions">
+          <button class="btn btn-secondary" onClick="{{ closeDialog }}">Cancel</button>
+          <button class="btn btn-primary blueprint" onClick="{{ confirmReset }}"><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>Reset</button>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;rowStyle&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;hairline&quot;,&quot;ledger&quot;,&quot;cells&quot;],&quot;default&quot;:&quot;hairline&quot;,&quot;tsType&quot;:&quot;'hairline'|'ledger'|'cells'&quot;,&quot;section&quot;:&quot;Variation&quot;},&quot;latency&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;min&quot;:100,&quot;max&quot;:1500,&quot;step&quot;:50,&quot;unit&quot;:&quot;ms&quot;,&quot;default&quot;:450,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Behavior&quot;},&quot;showLinks&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Behavior&quot;}}">
+class Component extends DCLogic {
+  static SEED = [[1,null,'Electronics'],[2,null,'Books'],[3,null,'Home and Garden'],[4,1,'Computers'],[5,1,'Phones'],[6,1,'Audio'],[7,2,'Fiction'],[8,2,'Non-fiction'],[9,3,'Furniture'],[10,4,'Laptops'],[11,4,'Desktops'],[12,5,'Smartphones'],[13,6,'Headphones'],[14,7,'Science Fiction'],[15,7,'Mystery'],[16,8,'History'],[17,9,'Chairs'],[18,10,'Ultrabooks'],[19,10,'Gaming Laptops'],[20,12,'Android'],[21,12,'iOS'],[22,14,'Space Opera'],[23,14,'Cyberpunk'],[24,16,'Ancient History'],[25,17,'Office Chairs'],[26,18,'Ultrabook 13-inch'],[27,18,'Ultrabook 15-inch'],[28,22,'Foundation Series'],[29,23,'Neuromancer'],[30,25,'Ergonomic Mesh Chair']];
+  static V = { hairline: { h: 30, indent: 18, font: 14 }, ledger: { h: 25, indent: 14, font: 13 }, cells: { h: 34, indent: 20, font: 14 } };
+  static MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+  static seedDb() { const d = {}; Component.SEED.forEach(([id, p, v]) => { d[id] = { id, parentId: p, value: v, isDeleted: false }; }); return d; }
+
+  rootRef = React.createRef(); mainRef = React.createRef(); dbBodyRef = React.createRef(); cacheBodyRef = React.createRef();
+  reqSeq = 0; toastSeq = 0; gen = 0; linesJson = '';
+
+  state = {
+    db: Component.seedDb(), nextId: 31, rootsLoaded: false, rootsLoading: true,
+    dbExpanded: {}, dbLoaded: {}, dbLoading: {}, dbSel: null,
+    cache: {}, cacheSel: null, cacheCollapsed: {}, editKey: null, draft: '', tmpSeq: 1,
+    hover: null, log: [], logOpen: false, toasts: [], dialog: null, applying: false, resetting: false,
+    loadingCache: false, pendingLoad: null, dragId: null, dragOver: false, flash: {}, lines: [], lastTransfer: null, rowStyle: null,
+  };
+
+  componentDidMount() {
+    this.onResize = () => this.measure();
+    window.addEventListener('resize', this.onResize);
+    this.loadRoots();
+  }
+  componentWillUnmount() { window.removeEventListener('resize', this.onResize); }
+
+  componentDidUpdate(prevProps, prevState) {
+    if (this.flipPrev) this.runFlip();
+    if (this.pendingFly) this.runFly();
+    if (this.state.editKey && this.state.editKey !== prevState.editKey) {
+      const i = this.q('[data-edit-input]'); if (i) { i.focus(); i.select(); }
+    }
+    this.measure();
+  }
+
+  q(sel) { return this.rootRef.current ? this.rootRef.current.querySelector(sel) : null; }
+  children(db, pid) { return Object.values(db).filter(n => n.parentId === pid).sort((a, b) => a.id - b.id); }
+  hasChildren(db, id) { return Object.values(db).some(n => n.parentId === id); }
+  ancestors(db, id) { const out = []; let p = db[id].parentId; while (p != null) { out.unshift(p); p = db[p].parentId; } return out; }
+  latency() { const base = this.props.latency ?? 450; return Math.round(base * (0.6 + Math.random() * 0.8)); }
+
+  call(method, path, work, extra = 0) {
+    const id = ++this.reqSeq; const ms = this.latency() + extra;
+    const t = new Date(); const time = [t.getHours(), t.getMinutes(), t.getSeconds()].map(x => String(x).padStart(2, '0')).join(':');
+    this.setState(s => ({ log: [{ id, time, method, path, status: null, ms: null }, ...s.log].slice(0, 80) }));
+    return new Promise(res => setTimeout(() => {
+      const r = work();
+      this.setState(s => ({ log: s.log.map(e => e.id === id ? { ...e, status: r.status, ms } : e) }));
+      res({ ...r, ms });
+    }, ms));
+  }
+
+  toast(severity, summary, detail) {
+    const id = ++this.toastSeq;
+    this.setState(s => ({ toasts: [...s.toasts, { id, severity, summary, detail }] }));
+    setTimeout(() => this.setState(s => ({ toasts: s.toasts.filter(t => t.id !== id) })), 3200);
+  }
+
+  flashKeys(map) {
+    this.setState(s => ({ flash: { ...s.flash, ...map } }));
+    setTimeout(() => this.setState(s => { const f = { ...s.flash }; Object.keys(map).forEach(k => delete f[k]); return { flash: f }; }), 1800);
+  }
+
+  setHover(side, key) {
+    const h = side ? { side, key } : null; const c = this.state.hover;
+    if ((h && c && h.side === c.side && h.key === c.key) || (!h && !c)) return;
+    this.setState({ hover: h });
+  }
+
+  loadRoots() {
+    this.setState({ rootsLoading: true });
+    this.call('GET', '/api/nodes/roots', () => ({ status: 200 })).then(() => this.setState({ rootsLoading: false, rootsLoaded: true }));
+  }
+
+  toggleDb(id) {
+    const key = String(id); const st = this.state;
+    if (st.dbExpanded[key]) { const e = { ...st.dbExpanded }; delete e[key]; this.setState({ dbExpanded: e }); return; }
+    if (st.dbLoaded[key]) { this.setState({ dbExpanded: { ...st.dbExpanded, [key]: true } }); return; }
+    if (st.dbLoading[key]) return;
+    const gen = this.gen;
+    this.setState(s => ({ dbLoading: { ...s.dbLoading, [key]: true } }));
+    this.call('GET', `/api/nodes/${id}/children`, () => ({ status: 200 })).then(() => {
+      if (gen !== this.gen) return;
+      this.setState(s => { const l = { ...s.dbLoading }; delete l[key]; return { dbLoading: l, dbLoaded: { ...s.dbLoaded, [key]: true }, dbExpanded: { ...s.dbExpanded, [key]: true } }; });
+    });
+  }
+
+  loadIntoCache(id) {
+    if (id == null || isNaN(id)) return;
+    const key = String(id); const ex = this.state.cache[key];
+    if (ex) { this.flashKeys({ ['c:' + key]: 'already cached' }); return; }
+    const gen = this.gen;
+    this.setState({ loadingCache: true, pendingLoad: { id, value: this.state.db[id].value } });
+    this.call('GET', `/api/nodes/${id}`, () => {
+      const n = this.state.db[id];
+      return { status: 200, result: { ...n, ancestorIds: this.ancestors(this.state.db, id) } };
+    }).then(({ result: d, ms }) => {
+      if (gen !== this.gen) return;
+      if (this.state.cache[key]) { this.setState({ loadingCache: false, pendingLoad: null }); return; }
+      const src = this.q(`[data-db-row="${key}"] [data-val]`);
+      this.snapshot();
+      this.pendingFly = { key, rect: src ? src.getBoundingClientRect() : null, label: d.value };
+      const cache = this.state.cache;
+      const ancestorKeys = d.ancestorIds.map(String);
+      const node = {
+        key, id: d.id, parentKey: d.parentId == null ? null : String(d.parentId), value: d.value, originalValue: d.value,
+        isDeleted: d.isDeleted, isNew: false, isEdited: false,
+        isPendingDelete: ancestorKeys.some(a => cache[a] && cache[a].isPendingDelete), ancestorKeys,
+      };
+      const re = Object.values(cache).filter(c => c.parentKey === key);
+      this.setState(s => ({ loadingCache: false, pendingLoad: null, cache: { ...s.cache, [key]: node }, lastTransfer: { id: d.id, value: d.value, ms, reparented: re.length } }));
+      if (re.length) {
+        const m = {}; re.forEach(c => { m['c:' + c.key] = 're-parented'; });
+        setTimeout(() => this.flashKeys(m), 380);
+      }
+    });
+  }
+
+  snapshot() {
+    const m = {}; const r = this.rootRef.current; if (!r) return;
+    r.querySelectorAll('[data-cache-row]').forEach(el => { m[el.dataset.cacheRow] = el.getBoundingClientRect(); });
+    this.flipPrev = m;
+  }
+
+  runFlip() {
+    const prev = this.flipPrev; this.flipPrev = null;
+    const flyKey = this.pendingFly && this.pendingFly.key;
+    const r = this.rootRef.current; if (!r) return;
+    r.querySelectorAll('[data-cache-row]').forEach(el => {
+      const k = el.dataset.cacheRow; const now = el.getBoundingClientRect(); const p = prev[k];
+      if (p) {
+        const dx = p.left - now.left, dy = p.top - now.top;
+        if (Math.abs(dx) > 1 || Math.abs(dy) > 1) el.animate([{ transform: `translate(${dx}px,${dy}px)` }, { transform: 'translate(0,0)' }], { duration: 460, easing: 'cubic-bezier(.2,.7,.2,1)' });
+      } else if (k !== flyKey) {
+        el.animate([{ opacity: 0, transform: 'translateX(-10px)' }, { opacity: 1, transform: 'none' }], { duration: 320, easing: 'ease-out' });
+      }
+    });
+    setTimeout(() => this.measure(), 500);
+  }
+
+  runFly() {
+    const { key, rect, label } = this.pendingFly; this.pendingFly = null;
+    const row = this.q(`[data-cache-row="${key}"]`); if (!row || !rect) return;
+    const tgtEl = row.querySelector('[data-val]') || row;
+    const tr = tgtEl.getBoundingClientRect();
+    const dur = 720;
+    row.animate([{ opacity: 0 }, { opacity: 0, offset: 0.82 }, { opacity: 1 }], { duration: dur });
+    const chip = document.createElement('div');
+    Object.assign(chip.style, {
+      position: 'fixed', left: (rect.left - 8) + 'px', top: (rect.top + rect.height / 2 - 13) + 'px', height: '26px', padding: '0 8px',
+      display: 'flex', alignItems: 'center', background: 'var(--color-accent)', color: 'var(--color-bg)',
+      font: '500 13px var(--font-body)', zIndex: 9999, pointerEvents: 'none', boxShadow: 'var(--shadow-md)', whiteSpace: 'nowrap',
+    });
+    chip.textContent = label;
+    document.body.appendChild(chip);
+    const dx = tr.left - rect.left, dy = (tr.top + tr.height / 2) - (rect.top + rect.height / 2);
+    const a = chip.animate([
+      { transform: 'translate(0,0) scale(.96)', opacity: 0 },
+      { transform: 'translate(0,-3px) scale(1.04)', opacity: 1, offset: 0.12 },
+      { transform: `translate(${dx * 0.5}px,${dy * 0.5 - 40}px) scale(1.06)`, offset: 0.5 },
+      { transform: `translate(${dx}px,${dy}px) scale(1)`, opacity: 1, offset: 0.86 },
+      { transform: `translate(${dx}px,${dy}px) scale(1)`, opacity: 0 },
+    ], { duration: dur, easing: 'cubic-bezier(.35,.55,.2,1)' });
+    a.onfinish = () => { chip.remove(); this.measure(); };
+  }
+
+  measure() {
+    const main = this.mainRef.current, dbb = this.dbBodyRef.current, cb = this.cacheBodyRef.current;
+    if (!main || !dbb || !cb) return;
+    let lines = [];
+    if (this.props.showLinks ?? true) {
+      const mr = main.getBoundingClientRect(), dr = dbb.getBoundingClientRect(), cr = cb.getBoundingClientRect();
+      const vis = (r, b) => r.bottom > b.top + 2 && r.top < b.bottom - 2;
+      const dbPos = {};
+      dbb.querySelectorAll('[data-db-row]').forEach(el => { const r = el.getBoundingClientRect(); if (vis(r, dr)) dbPos[el.dataset.dbRow] = r.top + r.height / 2 - mr.top; });
+      const st = this.state; const h = st.hover;
+      cb.querySelectorAll('[data-cache-row]').forEach(el => {
+        const k = el.dataset.cacheRow; if (dbPos[k] == null) return;
+        const r = el.getBoundingClientRect(); if (!vis(r, cr)) return;
+        const x1 = dr.right - mr.left, x2 = cr.left - mr.left, y1 = Math.round(dbPos[k]), y2 = Math.round(r.top + r.height / 2 - mr.top);
+        const active = (h && h.key === k) || st.dbSel === k || st.cacheSel === k;
+        lines.push({ k, x1, x2, y1, y2, active });
+      });
+    }
+    const j = JSON.stringify(lines);
+    if (j !== this.linesJson) { this.linesJson = j; this.setState({ lines }); }
+  }
+
+  selectCache(key) { if (this.state.editKey && this.state.editKey !== key) this.commitEdit(); this.setState({ cacheSel: key }); }
+  editable(n) { return n && !n.isDeleted && !n.isPendingDelete; }
+  startEdit(key) { const n = this.state.cache[key]; if (!this.editable(n)) return; this.setState({ cacheSel: key, editKey: key, draft: n.value }); }
+
+  commitEdit() {
+    const st = this.state; const key = st.editKey; if (!key) return;
+    const v = st.draft.trim();
+    if (!v || v.length > 200) { this.toast('error', 'Invalid value', 'Value must be 1 to 200 characters.'); this.setState({ editKey: null }); return; }
+    const n = st.cache[key];
+    this.setState({ editKey: null, cache: { ...st.cache, [key]: { ...n, value: v, isEdited: !n.isNew && v !== n.originalValue } } });
+  }
+
+  addChild() {
+    const st = this.state; const sel = st.cacheSel; const parent = st.cache[sel]; if (!this.editable(parent)) return;
+    if (st.editKey) this.commitEdit();
+    const seq = st.tmpSeq; const key = 'tmp-' + seq;
+    const node = { key, id: key, seq, parentKey: sel, value: 'New node', originalValue: '', isDeleted: false, isNew: true, isEdited: false, isPendingDelete: false, ancestorKeys: [...parent.ancestorKeys, sel] };
+    const col = { ...st.cacheCollapsed }; delete col[sel];
+    this.snapshot();
+    this.setState(s => ({ cache: { ...s.cache, [key]: node }, tmpSeq: seq + 1, cacheSel: key, editKey: key, draft: 'New node', cacheCollapsed: col }));
+  }
+
+  deleteSel() {
+    const st = this.state; const sel = st.cacheSel; if (!this.editable(st.cache[sel])) return;
+    const cache = {}; const m = {};
+    Object.values(st.cache).forEach(n => {
+      if (n.key === sel || n.ancestorKeys.includes(sel)) { cache[n.key] = { ...n, isPendingDelete: true }; if (n.key !== sel) m['c:' + n.key] = 'cascade'; }
+      else cache[n.key] = n;
+    });
+    this.setState({ cache, editKey: null });
+    if (Object.keys(m).length) this.flashKeys(m);
+  }
+
+  pending() {
+    const nodes = Object.values(this.state.cache);
+    return {
+      edits: nodes.filter(n => !n.isNew && n.isEdited && !n.isPendingDelete && !n.isDeleted),
+      adds: nodes.filter(n => n.isNew && !n.isPendingDelete).sort((a, b) => a.seq - b.seq),
+      deletes: nodes.filter(n => !n.isNew && n.isPendingDelete && !n.isDeleted),
+    };
+  }
+
+  confirmApply() {
+    const ch = this.pending(); const st0 = this.state;
+    this.setState({ dialog: null, applying: true });
+    this.call('POST', '/api/nodes/apply', () => {
+      const db = JSON.parse(JSON.stringify(this.state.db)); let next = this.state.nextId; const idMap = {};
+      ch.adds.forEach(a => { const nid = next++; idMap[a.key] = nid; const pid = a.parentKey.startsWith('tmp-') ? idMap[a.parentKey] : Number(a.parentKey); db[nid] = { id: nid, parentId: pid, value: a.value, isDeleted: false }; });
+      ch.edits.forEach(e => { db[e.id].value = e.value; });
+      const cascaded = [];
+      ch.deletes.forEach(d => { const ids = [d.id]; while (ids.length) { const x = ids.pop(); if (!db[x].isDeleted) cascaded.push(x); db[x].isDeleted = true; Object.values(db).forEach(n => { if (n.parentId === x) ids.push(n.id); }); } });
+      return { status: 200, result: { db, next, idMap, cascaded } };
+    }, 250).then(({ result }) => {
+      const mk = k => k == null ? null : (result.idMap[k] != null ? String(result.idMap[k]) : k);
+      const cache = {}; const fl = {};
+      Object.values(this.state.cache).forEach(c => {
+        if (c.isNew && c.isPendingDelete) return;
+        let n;
+        if (c.isNew) { const nid = result.idMap[c.key]; const d = result.db[nid]; n = { ...c, key: String(nid), id: nid, parentKey: mk(c.parentKey), ancestorKeys: c.ancestorKeys.map(mk), value: d.value, originalValue: d.value, isNew: false, isEdited: false, isPendingDelete: false, isDeleted: d.isDeleted }; delete n.seq; }
+        else { const d = result.db[c.id]; n = { ...c, value: d.value, originalValue: d.value, isDeleted: d.isDeleted, isEdited: false, isPendingDelete: false }; }
+        cache[n.key] = n;
+      });
+      ch.edits.forEach(e => { fl['c:' + e.key] = 'saved'; fl['db:' + e.key] = true; });
+      ch.adds.forEach(a => { const k = String(result.idMap[a.key]); fl['c:' + k] = 'saved #' + k; fl['db:' + k] = true; });
+      result.cascaded.forEach(id => { fl['db:' + id] = true; });
+      const sel = mk(this.state.cacheSel);
+      this.snapshot();
+      this.setState({ db: result.db, nextId: result.next, cache, cacheSel: cache[sel] ? sel : null, applying: false });
+      this.flashKeys(fl);
+      this.toast('success', 'Changes applied', `${ch.edits.length} edited · ${ch.adds.length} added · ${ch.deletes.length} deleted (${result.cascaded.length} rows marked in the database)`);
+    });
+  }
+
+  confirmReset() {
+    this.setState({ dialog: null, resetting: true });
+    this.call('POST', '/api/reset', () => ({ status: 200 }), 200).then(() => {
+      this.gen++;
+      this.setState({ db: Component.seedDb(), nextId: 31, dbExpanded: {}, dbLoaded: {}, dbLoading: {}, dbSel: null, cache: {}, cacheSel: null, editKey: null, cacheCollapsed: {}, tmpSeq: 1, resetting: false, lastTransfer: null, loadingCache: false, pendingLoad: null, flash: {} });
+      this.toast('success', 'Reset complete', 'Database restored to the sample data; cache cleared.');
+    });
+  }
+
+  rowCommon(v, o) {
+    const V = Component.V[v]; const M = Component.MONO;
+    const tint = 'color-mix(in srgb, var(--color-accent) 11%, transparent)';
+    const bg = o.selected ? 'var(--color-accent-200)' : o.flash ? 'var(--color-accent-100)' : (o.linked || o.hovered) ? tint : 'transparent';
+    const style = {
+      display: 'flex', alignItems: 'center', gap: '6px', height: V.h + 'px', paddingRight: '8px', cursor: 'pointer', position: 'relative',
+      fontSize: V.font + 'px', userSelect: 'none', whiteSpace: 'nowrap', background: bg, transition: 'background-color .2s, border-color .2s',
+      color: o.selected ? 'var(--color-accent-900)' : 'var(--color-text)',
+      outline: o.linked ? '1px solid var(--color-accent)' : 'none', outlineOffset: '-1px',
+    };
+    let guideStyle = { display: 'none' };
+    let idLeftStyle = { display: 'none' };
+    let idRightStyle = { fontFamily: M, fontSize: '11px', color: 'var(--color-neutral-600)', paddingLeft: '8px', flex: 'none' };
+    if (v === 'hairline') {
+      style.paddingLeft = '4px';
+      guideStyle = { width: (o.depth * V.indent) + 'px', alignSelf: 'stretch', flex: 'none', backgroundImage: 'linear-gradient(to right, var(--color-neutral-300) 1px, transparent 1px)', backgroundSize: V.indent + 'px 100%', backgroundPosition: '8px 0', backgroundRepeat: 'repeat-x' };
+    } else if (v === 'ledger') {
+      style.paddingLeft = '0'; style.borderBottom = '1px solid color-mix(in srgb, var(--color-text) 8%, transparent)';
+      guideStyle = { width: (o.depth * V.indent) + 'px', flex: 'none' };
+      idLeftStyle = { display: 'flex', alignItems: 'center', justifyContent: 'flex-end', width: '40px', flex: 'none', alignSelf: 'stretch', paddingRight: '8px', marginRight: '2px', fontFamily: M, fontSize: '11px', color: o.selected ? 'var(--color-accent-800)' : 'var(--color-neutral-600)', borderRight: '1px solid var(--color-divider)' };
+      idRightStyle = { display: 'none' };
+    } else {
+      style.paddingLeft = '6px'; style.marginLeft = (o.depth * V.indent) + 'px'; style.marginBottom = '4px';
+      style.border = '1px solid ' + (o.selected || o.linked ? 'var(--color-accent)' : 'var(--color-divider)');
+      style.outline = 'none'; style.background = o.selected ? 'var(--color-accent-100)' : bg; style.color = 'var(--color-text)';
+    }
+    const valueStyle = { textDecoration: o.deleted ? 'line-through' : 'none', opacity: o.deleted ? 0.55 : 1, overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, flex: '0 1 auto', fontWeight: o.selected ? 500 : 400 };
+    return { style, guideStyle, idLeftStyle, idRightStyle, valueStyle };
+  }
+
+  chev(open) { return { display: 'block', transform: open ? 'rotate(90deg)' : 'none', transition: 'transform .18s ease' }; }
+
+  linesEl() {
+    const els = [];
+    this.state.lines.forEach(l => {
+      const c = l.active ? 'var(--color-accent)' : 'var(--color-neutral-400)';
+      const mx = (l.x2 - l.x1) * 0.5;
+      els.push(React.createElement('path', { key: 'p' + l.k, d: `M${l.x1} ${l.y1} C${l.x1 + mx} ${l.y1}, ${l.x2 - mx} ${l.y2}, ${l.x2} ${l.y2}`, fill: 'none', stroke: c, strokeWidth: l.active ? 1.5 : 1, strokeDasharray: l.active ? 'none' : '2 3' }));
+      els.push(React.createElement('rect', { key: 'a' + l.k, x: l.x1 - 2.5, y: l.y1 - 2.5, width: 5, height: 5, fill: c }));
+      els.push(React.createElement('rect', { key: 'b' + l.k, x: l.x2 - 2.5, y: l.y2 - 2.5, width: 5, height: 5, fill: c }));
+    });
+    return React.createElement('svg', { style: { position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none', overflow: 'visible', zIndex: 1 } }, els);
+  }
+
+  renderVals() {
+    const st = this.state; const v = st.rowStyle || this.props.rowStyle || 'hairline'; const h = st.hover;
+    const dbRows = [];
+    if (st.rootsLoaded) {
+      const walk = (pid, depth) => this.children(st.db, pid).forEach(n => {
+        const key = String(n.id); const hasCh = this.hasChildren(st.db, n.id); const exp = !!st.dbExpanded[key] && !!st.dbLoaded[key]; const loading = !!st.dbLoading[key];
+        const selected = st.dbSel === key;
+        const c = this.rowCommon(v, { depth, selected, linked: !!(h && h.side === 'c' && h.key === key), hovered: !!(h && h.side === 'db' && h.key === key), flash: !!st.flash['db:' + key], deleted: n.isDeleted });
+        dbRows.push({
+          key, idLabel: '#' + n.id, value: n.value, ...c, hasToggle: hasCh, isLeaf: !hasCh, loading, notLoading: !loading, chevStyle: this.chev(exp),
+          badges: n.isDeleted ? [{ label: 'deleted', cls: 'tag tag-neutral' }] : [], cached: !!st.cache[key],
+          onClick: () => this.setState({ dbSel: key }),
+          onToggle: e => { e.stopPropagation(); this.toggleDb(n.id); },
+          onDblClick: () => this.loadIntoCache(n.id),
+          onEnter: () => this.setHover('db', key), onLeave: () => this.setHover(null),
+          onDragStart: e => { e.dataTransfer.setData('text/plain', key); e.dataTransfer.effectAllowed = 'copy'; this.setState({ dragId: key, dbSel: key }); },
+          onDragEnd: () => this.setState({ dragId: null, dragOver: false }),
+        });
+        if (exp) walk(n.id, depth + 1);
+      });
+      walk(null, 0);
+    }
+
+    const nodes = Object.values(st.cache); const byParent = {}; const roots = [];
+    const ord = n => n.isNew ? 1e9 + n.seq : n.id;
+    nodes.forEach(n => { if (n.parentKey && st.cache[n.parentKey]) (byParent[n.parentKey] = byParent[n.parentKey] || []).push(n); else roots.push(n); });
+    const cacheRows = [];
+    const cwalk = (list, depth) => list.sort((a, b) => ord(a) - ord(b)).forEach(n => {
+      const key = n.key; const kids = byParent[key] || []; const open = !st.cacheCollapsed[key];
+      const selected = st.cacheSel === key; const fl = st.flash['c:' + key];
+      const c = this.rowCommon(v, { depth, selected, linked: !!(h && h.side === 'db' && h.key === key), hovered: !!(h && h.side === 'c' && h.key === key), flash: !!fl, deleted: n.isDeleted || n.isPendingDelete });
+      const badges = [];
+      if (n.isNew) badges.push({ label: 'new', cls: 'tag tag-accent' });
+      if (n.isEdited && !n.isPendingDelete) badges.push({ label: 'edited', cls: 'tag tag-outline' });
+      if (n.isPendingDelete && !n.isDeleted) badges.push({ label: 'to delete', cls: 'tag tag-neutral' });
+      if (n.isDeleted) badges.push({ label: 'deleted', cls: 'tag tag-neutral' });
+      if (typeof fl === 'string') badges.push({ label: fl, cls: 'tag tag-accent' });
+      const editing = st.editKey === key;
+      cacheRows.push({
+        key, idLabel: n.isNew ? 'tmp' : '#' + n.id, value: n.value, ...c, badges, editing, notEditing: !editing,
+        hasToggle: kids.length > 0, isLeaf: kids.length === 0, chevStyle: this.chev(open),
+        parentHint: n.parentKey && !st.cache[n.parentKey] ? 'parent #' + n.parentKey : '',
+        onClick: () => this.selectCache(key),
+        onToggle: e => { e.stopPropagation(); const col = { ...st.cacheCollapsed }; if (col[key]) delete col[key]; else col[key] = true; this.snapshot(); this.setState({ cacheCollapsed: col }); },
+        onDblClick: () => this.startEdit(key),
+        onEnter: () => this.setHover('c', key), onLeave: () => this.setHover(null),
+      });
+      if (open) cwalk(kids, depth + 1);
+    });
+    cwalk(roots, 0);
+
+    const sel = st.cache[st.cacheSel]; const canEdit = this.editable(sel) && !st.applying;
+    const ch = this.pending(); const nChanges = ch.edits.length + ch.adds.length + ch.deletes.length;
+    const label = k => { const n = st.cache[k]; return n ? (n.isNew ? n.value : `#${n.id} ${n.value}`) : '#' + k; };
+    const applyItems = [
+      ...ch.adds.map(a => ({ tag: 'add', cls: 'tag tag-accent', text: `${a.value} under ${label(a.parentKey)}` })),
+      ...ch.edits.map(e => ({ tag: 'edit', cls: 'tag tag-outline', text: `#${e.id} ${e.originalValue} → ${e.value}` })),
+      ...ch.deletes.map(d => ({ tag: 'delete', cls: 'tag tag-neutral', text: `#${d.id} ${d.value} and all descendants` })),
+    ];
+
+    const opts = [['1a', 'hairline', 'Hairline'], ['1b', 'ledger', 'Ledger'], ['1c', 'cells', 'Cells']];
+    const segOpts = opts.map(([id, val, lbl]) => ({
+      id, label: lbl, onClick: () => this.setState({ rowStyle: val }),
+      style: { display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '5px 10px', fontSize: '13px', cursor: 'pointer', border: 0, borderLeft: id === '1a' ? 0 : '1px solid var(--color-divider)', fontFamily: 'var(--font-body)', background: v === val ? 'var(--color-accent)' : 'transparent', color: v === val ? 'var(--color-bg)' : 'var(--color-text)' },
+    }));
+
+    const last = st.log[0]; const pendingReq = st.log.some(e => e.status == null);
+    const dragNode = st.dragId ? st.db[st.dragId] : null;
+    const lt = st.lastTransfer; const pl = st.pendingLoad;
+
+    return {
+      rootRef: this.rootRef, mainRef: this.mainRef, dbBodyRef: this.dbBodyRef, cacheBodyRef: this.cacheBodyRef,
+      segOpts, dbRows, cacheRows, linesSvg: this.linesEl(),
+      rootsLoading: st.rootsLoading, dbEmpty: st.rootsLoaded && dbRows.length === 0, cacheEmpty: cacheRows.length === 0,
+      loadingCache: st.loadingCache, notLoadingCache: !st.loadingCache, loadDisabled: st.dbSel == null || st.loadingCache,
+      loadSelected: () => this.loadIntoCache(Number(st.dbSel)),
+      onScroll: () => this.measure(),
+      editDisabled: !canEdit, applyDisabled: nChanges === 0 || st.applying,
+      applyIconStyle: st.applying ? { animation: 'pulse .8s ease-in-out infinite' } : {},
+      startEditSel: () => this.startEdit(st.cacheSel), addChild: () => this.addChild(), deleteSel: () => this.deleteSel(),
+      askApply: () => { if (st.editKey) this.commitEdit(); this.setState({ dialog: 'apply' }); },
+      askReset: () => this.setState({ dialog: 'reset' }), resetting: st.resetting,
+      resetIconStyle: st.resetting ? { animation: 'spin .8s linear infinite' } : {},
+      closeDialog: () => this.setState({ dialog: null }), stop: e => e.stopPropagation(),
+      confirmApply: () => this.confirmApply(), confirmReset: () => this.confirmReset(),
+      dialogApply: st.dialog === 'apply', dialogReset: st.dialog === 'reset',
+      applyItems, hasDeletes: ch.deletes.length > 0,
+      applySummary: `${nChanges} pending change${nChanges === 1 ? '' : 's'} will be written to the database in one transaction.`,
+      draft: st.draft, onDraft: e => this.setState({ draft: e.target.value }), commitEdit: () => this.commitEdit(),
+      onEditKey: e => { if (e.key === 'Enter') this.commitEdit(); if (e.key === 'Escape') { const n = st.cache[st.editKey]; if (n && n.isNew && n.value === 'New node' && e.target.value === 'New node') { /* keep */ } this.setState({ editKey: null }); } },
+      dragging: !!st.dragId, dragOver: st.dragOver, dragLabel: dragNode ? `#${dragNode.id} ${dragNode.value}` : '',
+      cacheDragOver: e => { if (!st.dragId) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; if (!st.dragOver) this.setState({ dragOver: true }); },
+      cacheDragLeave: e => { if (e.currentTarget.contains(e.relatedTarget)) return; this.setState({ dragOver: false }); },
+      cacheDrop: e => { e.preventDefault(); const k = e.dataTransfer.getData('text/plain') || st.dragId; this.setState({ dragOver: false, dragId: null }); if (k) this.loadIntoCache(Number(k)); },
+      showTransfer: !st.dragId && !!(pl || lt), showHint: !st.dragId && !pl && !lt,
+      transferKicker: pl ? 'Loading' : 'Last load',
+      transferLabel: pl ? `#${pl.id} ${pl.value}` : lt ? `#${lt.id} ${lt.value}` : '',
+      transferPath: pl ? `GET /api/nodes/${pl.id}` : lt ? `GET /api/nodes/${lt.id}` : '',
+      transferStatus: pl ? 'pending…' : lt ? `200 · ${lt.ms} ms${lt.reparented ? ` · ${lt.reparented} re-parented` : ''}` : '',
+      toggleLog: () => this.setState(s => ({ logOpen: !s.logOpen })), logOpen: st.logOpen,
+      logChevStyle: { display: 'block', transform: st.logOpen ? 'rotate(180deg)' : 'none', transition: 'transform .18s' },
+      logCountLabel: `${st.log.length} request${st.log.length === 1 ? '' : 's'}`, hasPendingReq: pendingReq,
+      lastLogText: last ? `${last.method} ${last.path} → ${last.status ?? '…'}${last.ms != null ? ` · ${last.ms} ms` : ''}` : 'No requests yet',
+      logRows: st.log.map(e => ({ ...e, statusLabel: e.status ?? 'pending', statusCls: e.status ? 'tag tag-accent' : 'tag tag-neutral', msLabel: e.ms != null ? e.ms + ' ms' : '…' })),
+      logEmpty: st.log.length === 0,
+      toasts: st.toasts,
+    };
+  }
+}
+</script>
+</body>
+</html>

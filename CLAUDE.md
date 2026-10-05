@@ -12,6 +12,7 @@ Everything starts with `docker compose up --build`.
 | `backend/` | .NET 8 API + test project (has its own `CLAUDE.md` from stage 2) |
 | `frontend/` | Vue 3 SPA + its Dockerfile (has its own `CLAUDE.md` from stage 2) |
 | `docs/ai/` | AI context, YAML only: `workflow.yaml`, `roadmap.yaml`, `conventions.yaml`, `api-contract.yaml` |
+| `docs/design/` | Imported design references per stage (stage 5: "Industry" Tree Editor) |
 | `docs/plans/` | Stage plans, a `.md` (human) + `.yaml` (AI) pair per plan |
 | `docker-compose.yml` | db + api + ui |
 | `README.md` | Start instructions, schema, decisions (final version in stage 4) |
@@ -62,6 +63,7 @@ Defined with goals and definitions of done in [docs/ai/roadmap.yaml](docs/ai/roa
 2. Base structure (compose, seeded DB, lazy DBTreeView, Reset, integration tests)
 3. Cache core (load into cache, hierarchy assembly, deleted-state display, backend Apply endpoint)
 4. Cache pending changes (edit/add/delete until Apply, temp ids, cascade marking, id mapping, edge cases, final README)
+5. UI update ("Industry" design from claude.ai design — reference in [docs/design/stage-5/](docs/design/stage-5/README.md))
 
 ## Decisions
 
@@ -70,4 +72,6 @@ Defined with goals and definitions of done in [docs/ai/roadmap.yaml](docs/ai/roa
 - Tree storage: adjacency list (`nodes.parent_id`, immutable via trigger) + recursive CTEs for ancestors / subtree soft-delete; index `(parent_id, id)` — [decision record](docs/plans/stage-2-backend.md#decision-record-1--tree-storage-model)
 - Writes serialized: Apply, Reset and startup seed take `pg_advisory_xact_lock(4242)` (`DbLocks.TreeWriteLockKey`) as the first statement of their transaction; apply SQL is set-based raw Npgsql — [decision record](docs/plans/stage-3-backend.md#decision-record-4--write-serialization-concurrency)
 - Cache hierarchy: flat node map + pure `buildCacheTree` placing each node under its nearest cached ancestor (scan `ancestorIds` parent→root), gap marker for missing levels; reload refreshes server fields only and keeps pending state; stage 4 apply sends `refreshIds` = every cached real id — [decision records](docs/plans/stage-3-frontend.md)
-- PrimeVue styling: npm override pins `@primeuix/styles` 1.0.3 so component CSS matches the `@primeuix/styled` 0.5 engine used by primevue 4.3.3 — [fix](docs/plans/stage-3-frontend.yaml)
+- PrimeVue styling: npm override pins `@primeuix/styles` 1.0.3 so component CSS matches the `@primeuix/styled` 0.5 engine used by primevue 4.3.3; `frontend/src/dependencyPins.test.ts` fails `npm test` if primevue 4.3.3, @primeuix/themes 1.0.3 and @primeuix/styles 1.0.3 (deps + override) drift apart — [fix](docs/plans/stage-3-frontend.yaml), [guard](docs/plans/stage-4-frontend.md#dr-fe-49-primevue-pin-guard-open-risk-3)
+- Cache pending changes: pure `src/cache/pending.ts`; `propagateDeletes` after every merge and delete (nodes loaded under a pending-delete ancestor become pending delete; under a deleted ancestor, deleted); Apply sends top-most deletes, edits of non-deleted nodes, temp adds not under a deleted ancestor, and `refreshIds` = every cached real id; on 200 settle → re-key via `idMap` → merge; on failure keep everything — [decision records](docs/plans/stage-4-frontend.md#decision-records), [client_rules](docs/ai/api-contract.yaml)
+- Ids: identity sequence, never reused except across Reset; 400/404/409 consume no ids, a 500 after allocation leaves a gap (accepted); the client treats ids as opaque — [decision record](docs/plans/stage-4-backend.md#decision-record-2--sequence-gaps-are-accepted-stage-3-open-risk-4)

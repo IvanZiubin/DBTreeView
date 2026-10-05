@@ -40,6 +40,10 @@ docs:
     naming: "<stage>-<project>.md + <stage>-<project>.yaml (project: backend | frontend)"
     md: human-readable rationale and decision records
     yaml: ordered steps, files, acceptance criteria — executable literally by a Sonnet worker
+  docs_design:
+    path: docs/design/<stage>/
+    purpose: imported design references (read-only copies from claude.ai design) + README.md with anatomy and rules
+    rule: frontend ports tokens/markup into its own source; never imports from docs/design/
   decisions: one line + link in the Decisions section of root CLAUDE.md
 
 git:
