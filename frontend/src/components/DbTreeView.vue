@@ -3,7 +3,6 @@ import { onMounted, ref } from 'vue'
 import Button from 'primevue/button'
 import Tree from 'primevue/tree'
 import type { TreeNode } from 'primevue/treenode'
-import { useToast } from 'primevue/usetoast'
 import NodeLabel from './NodeLabel.vue'
 import { getNode } from '../api/client'
 import type { Node } from '../api/types'
@@ -13,7 +12,6 @@ import { useDbTreeStore } from '../stores/dbTree'
 
 const dbTree = useDbTreeStore()
 const cache = useCacheStore()
-const toast = useToast()
 const loadingIntoCache = ref(false)
 
 onMounted(async () => {
@@ -32,22 +30,20 @@ async function onNodeExpand(node: TreeNode): Promise<void> {
   }
 }
 
+/** GET /api/nodes/{id} -> cache.loadNode. No success toast: the node is selected and revealed in the cache. */
 async function onLoadIntoCache(): Promise<void> {
   const id = dbTree.selectedId
   if (id === null) {
     return
   }
+  const startedEpoch = cache.epoch
   loadingIntoCache.value = true
   try {
     const details = await getNode(id)
+    if (startedEpoch !== cache.epoch) {
+      return
+    }
     cache.loadNode(details)
-    // TODO stage 3: replace this toast once the cache store implements loadNode.
-    toast.add({
-      severity: 'info',
-      summary: 'Not available yet',
-      detail: 'Cache loading arrives in stage 3',
-      life: 3000,
-    })
   } catch (err) {
     reportError(err)
   } finally {
@@ -68,7 +64,7 @@ function nodeData(node: TreeNode): Node {
         label="Load into cache"
         icon="pi pi-download"
         size="small"
-        :disabled="dbTree.selectedId === null"
+        :disabled="dbTree.selectedId === null || loadingIntoCache"
         :loading="loadingIntoCache"
         data-testid="load-into-cache"
         @click="onLoadIntoCache"

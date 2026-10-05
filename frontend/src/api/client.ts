@@ -106,7 +106,7 @@ export function resetDatabase(): Promise<Node[]> {
   return request<Node[]>('POST', '/reset')
 }
 
-/** POST /api/nodes/apply — returns 501 in stage 2; not called until stage 3. */
+/** POST /api/nodes/apply — one transactional batch (contract v2). Callers send refreshIds = every real cached id (cache.realIds). */
 export function applyChanges(body: ApplyRequest): Promise<ApplyResponse> {
   return request<ApplyResponse>('POST', '/nodes/apply', body)
 }
