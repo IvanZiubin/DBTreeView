@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
+using TreeEditor.Api.Infrastructure;
 
 namespace TreeEditor.Api.Data;
 
@@ -19,12 +20,14 @@ public sealed class TreeSeeder(TreeDbContext db)
     /// <summary>Inserts the seed when the table is empty. Returns true if it seeded.</summary>
     public async Task<bool> SeedIfEmptyAsync(CancellationToken ct)
     {
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
+        await DbLocks.AcquireTreeWriteLockAsync(db, ct);
+
         if (await db.Nodes.AnyAsync(ct))
         {
             return false;
         }
 
-        await using var tx = await db.Database.BeginTransactionAsync(ct);
         await InsertSeedAsync(ct);
         await tx.CommitAsync(ct);
         return true;
@@ -34,6 +37,7 @@ public sealed class TreeSeeder(TreeDbContext db)
     public async Task ResetAsync(CancellationToken ct)
     {
         await using var tx = await db.Database.BeginTransactionAsync(ct);
+        await DbLocks.AcquireTreeWriteLockAsync(db, ct);
         await db.Database.ExecuteSqlRawAsync(TruncateSql, ct);
         await InsertSeedAsync(ct);
         await tx.CommitAsync(ct);

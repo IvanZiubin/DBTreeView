@@ -22,6 +22,7 @@ builder.Services.AddDbContext<TreeDbContext>((services, options) =>
     options.UseNpgsql(connectionString);
 });
 builder.Services.AddScoped<TreeSeeder>();
+builder.Services.AddScoped<ApplyService>();
 
 var app = builder.Build();
 
