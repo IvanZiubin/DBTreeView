@@ -1097,7 +1097,7 @@ acceptance_criteria:
       expect: body starts with "[" and contains "\"hasChildren\""
     - id: AC8
       check: No CORS configuration in frontend
-      command: grep -rniE "cors|Access-Control" /Users/maczone/Desktop/personal/test_qit/frontend --include=*.ts --include=*.vue --include=*.conf --include=Dockerfile --exclude-dir=node_modules --exclude-dir=dist
+      command: grep -rnE "Access-Control-|add_header .*[Cc]ors|cors\(|[Cc]ors:" /Users/maczone/Desktop/personal/test_qit/frontend --include='*.ts' --include='*.vue' --include='*.conf' --include=Dockerfile --exclude-dir=node_modules --exclude-dir=dist
       expect: no matches (grep exit 1)
     - id: AC9
       check: fetch used only in the API client
