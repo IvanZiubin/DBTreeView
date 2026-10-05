@@ -163,8 +163,10 @@ client_rules:
     adds = remaining isNew nodes, parentId for a real parent or parentTempId for a temp parent.
   failure_handling: >
     On any non-2xx apply response the cache keeps all pending state unchanged (nothing persisted server-side,
-    see apply_semantics.atomic) and shows the ProblemDetails title/detail. On 409/404 the nodeIds extension may
-    be used to highlight offending nodes; the user can reload them to see the current DB state.
+    see apply_semantics.atomic) and shows the ProblemDetails title/detail. Exception, 409: the nodeIds are already
+    deleted in the DB, so the cache marks them isDeleted and runs propagateDeletes (their pending edits / deletes and
+    temp children are discarded), keeps every other pending change, and the user re-applies. On 404 the nodeIds
+    extension may be used to highlight offending nodes.
   reset: Reset clears the whole cache, including pending changes, and bumps the cache epoch (stage-3 race guard).
 
 endpoints:

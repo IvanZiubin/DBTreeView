@@ -4,8 +4,6 @@ Two tree views over a PostgreSQL tree of arbitrary depth: **DBTreeView** lazy-lo
 **CachedTreeView** holds individually loaded nodes and keeps edits/adds/deletes pending until **Apply**.
 **Reset** restores the sample data. Spec: [task.md](task.md).
 
-> Status: complete (stages 1–4) — DBTreeView, cache with hierarchy assembly, pending edit / add / delete until Apply, Apply and Reset all work. Stage 5 (UI restyle) is planned.
-
 ## Quick start
 
 ```bash
@@ -33,14 +31,15 @@ The UI follows the "Industry" design (source: `docs/design/stage-5/`): a DB pane
 - **Clear cache:** empties the local cache (including unapplied changes and temp ids) with no API call and without touching the database; it asks for confirmation only when changes would be lost.
 - **Reset:** restores the sample data and clears the cache.
 - **Network log:** a collapsible footer listing every API request the UI makes (time, method, path, status, duration).
-- **Styling:** no UI component library. Industry tokens and component classes are ported to `frontend/src/styles/industry.css`, app classes live in `frontend/src/styles/app.css`; fonts are Barlow / Barlow Condensed (Google Fonts); icons are Lucide (`lucide-vue-next`).
+- **Styling:** no UI component library. Industry tokens and component classes are ported to `frontend/src/styles/industry.css`, app classes live in `frontend/src/styles/app.css`; fonts are Barlow / Barlow Condensed, self-hosted in `frontend/src/assets/fonts/` (`frontend/src/styles/fonts.css`, works offline); icons are Lucide (`lucide-vue-next`).
 - **Motion / width:** motion honours `prefers-reduced-motion`; the minimum layout width is 1024px.
 
 ### Cache behaviour
 
-- **Hierarchy:** flat node map; each node is shown under its nearest cached ancestor (`ancestorIds` from `GET /api/nodes/{id}`); a "…" marker stands for levels that are not loaded.
+- **Hierarchy:** flat node map; each node is shown under its nearest cached ancestor (`ancestorIds` from `GET /api/nodes/{id}`); a `parent #id` hint (tooltip lists the missing ids) marks levels that are not loaded.
 - **Pending changes:** temp ids `tmp-<n>` (also for children of new nodes), mapped to real ids from the apply response `idMap`. Delete cascades to every cached descendant immediately and to never-loaded descendants in the DB on Apply. Nodes loaded later under a node marked for deletion are shown as to delete; deleted / to-delete nodes cannot be edited.
 - **Edge cases:** edits and new children under a node marked for deletion are not sent (they would end up deleted anyway). After Apply every cached node is refreshed (`refreshIds`) so cascaded deletions show without reloading. A failed Apply keeps all pending changes.
+- **Stale cache (409):** if another client deleted a node you changed (or one of its ancestors), Apply saves nothing and returns the offending ids. The cache marks those nodes as deleted, discards their pending edits and new children, keeps every other pending change, and refreshes the DB tree — review and click Apply again.
 
 ## Tests
 
@@ -55,7 +54,7 @@ Integration tests cover reads, Reset, every Apply rule (validation, 404/409, cas
 Frontend tests (Vitest, Node env, no DOM: hierarchy and re-parent logic, pending-change logic, stores incl. Clear cache and the single load path, network log, view models for tree rows / link lines / dialogs, highlight and toasts, API client request observer, dependency guard):
 
 ```bash
-cd frontend && source ~/.nvm/nvm.sh && nvm use 22 >/dev/null && npm test
+cd frontend && npm ci && npm test   # Node 22
 ```
 
 ## Local development
@@ -89,7 +88,7 @@ before any DB access), 404 referenced node missing, 409 edit of / add under an a
 
 The cache sends every real id it holds in `refreshIds`, so cascaded deletes of cached descendants come back in the same response (the server never enumerates whole subtrees).
 
-409 means the cache is stale (another client deleted the node or an ancestor): nothing is persisted, `nodeIds` lists the offending ids, and pending changes stay in the cache.
+409 means the cache is stale (another client deleted the node or an ancestor): nothing is persisted, `nodeIds` lists the offending ids; the UI marks them deleted in the cache, discards only their changes and keeps the rest pending for another Apply.
 
 Concurrency: Apply, Reset and the startup seed take the transaction-scoped advisory lock `pg_advisory_xact_lock(4242)` first,
 so tree writes are serialized and a deleted parent can never gain a live child.
@@ -97,7 +96,7 @@ so tree writes are serialized and a deleted parent can never gain a live child.
 ### Cache hierarchy rule (UI)
 
 CachedTreeView stores loaded nodes flat; the tree is derived on every change. A node is shown under its **nearest cached ancestor**
-(from `ancestorIds`); if some ancestors between them are not cached, a muted dashed "..." gap marker with a tooltip lists the
+(from `ancestorIds`); if some ancestors between them are not cached, a `parent #id` hint with a tooltip lists the
 missing levels. Nodes with no cached ancestor are top-level. Loading a missing parent later re-parents the children automatically.
 
 ## Database schema
@@ -124,8 +123,7 @@ Apply, Reset and the startup seed take the transaction-scoped advisory lock `pg_
 Adjacency list (`parent_id`) plus recursive CTEs (raw SQL) for ancestors and subtree soft-delete.
 It keeps writes trivial (adding a node inserts one row; parents never move), lazy child loading is a single indexed lookup, and
 arbitrary depth works without extra bookkeeping. Nested sets / materialized path / closure table speed up subtree reads but
-make inserts and deletes rewrite many rows, which is unnecessary here. Adds under new (temp) nodes need only the parent's freshly allocated id, which is why adjacency list beats materialized path / closure table / nested sets here. Rationale:
-[docs/plans/stage-2-backend.md](docs/plans/stage-2-backend.md#decision-record-1--tree-storage-model).
+make inserts and deletes rewrite many rows, which is unnecessary here. Adds under new (temp) nodes need only the parent's freshly allocated id, which is why adjacency list beats materialized path / closure table / nested sets here.
 
 ### Seed
 
