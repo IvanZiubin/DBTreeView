@@ -1,0 +1,1328 @@
+# Stage 3 backend plan — executable literally. Human rationale: docs/plans/stage-3-backend.md
+stage: 3
+name: cache-core
+project: backend
+
+scope:
+  implementer_may_write:
+    - backend/
+    - docker-compose.yml
+  implementer_must_not_write:
+    - frontend/
+    - docs/
+    - CLAUDE.md
+    - backend/CLAUDE.md
+    - README.md
+
+environment:
+  os: macOS
+  dotnet_sdk: 8.0.422
+  docker: "Docker Desktop, compose v2"
+  all_paths_relative_to_repo_root: /Users/maczone/Desktop/personal/test_qit
+
+fixed_versions:
+  target_framework: net8.0
+  new_nuget_packages: none   # Npgsql 8 (via Npgsql.EntityFrameworkCore.PostgreSQL 8.0.11) already provides NpgsqlCommand / NpgsqlDbType
+  schema_or_migration_changes: none
+
+prerequisites:
+  scaffold_commands: []      # nothing for chore-runner; no packages, no scaffolding
+  must_hold_before_start:
+    - "Stage 2 is committed; `cd backend && dotnet build TreeEditor.sln` succeeds."
+    - Docker Desktop is running.
+
+# ---------------------------------------------------------------------------
+# Implementation steps (plan-implementer, scope backend/ + docker-compose.yml).
+# "create" = write a new file with exactly this content. "replace" = overwrite
+# the existing file with exactly this content. "delete" = remove the file.
+# Do not touch any file not listed here.
+# ---------------------------------------------------------------------------
+steps:
+  - id: 1
+    title: Shared problem types and the tree write lock
+    files:
+      - { path: backend/src/TreeEditor.Api/Infrastructure/ProblemTypes.cs, action: replace }
+      - { path: backend/src/TreeEditor.Api/Infrastructure/DbLocks.cs, action: create }
+    instructions:
+      - path: backend/src/TreeEditor.Api/Infrastructure/ProblemTypes.cs
+        content: |
+          namespace TreeEditor.Api.Infrastructure;
+
+          public static class ProblemTypes
+          {
+              public const string BadRequest = "https://tools.ietf.org/html/rfc9110#section-15.5.1";
+              public const string NotFound = "https://tools.ietf.org/html/rfc9110#section-15.5.5";
+              public const string Conflict = "https://tools.ietf.org/html/rfc9110#section-15.5.10";
+              public const string ServiceUnavailable = "https://tools.ietf.org/html/rfc9110#section-15.6.4";
+          }
+      - path: backend/src/TreeEditor.Api/Infrastructure/DbLocks.cs
+        content: |
+          using Microsoft.EntityFrameworkCore;
+          using TreeEditor.Api.Data;
+
+          namespace TreeEditor.Api.Infrastructure;
+
+          /// <summary>
+          /// Transaction-scoped PostgreSQL advisory lock that serializes every tree write
+          /// (POST /api/nodes/apply, POST /api/reset, startup seed). Must be the first statement
+          /// after BEGIN; released automatically on COMMIT or ROLLBACK.
+          /// </summary>
+          public static class DbLocks
+          {
+              public const long TreeWriteLockKey = 4242;
+
+              public static Task AcquireTreeWriteLockAsync(TreeDbContext db, CancellationToken ct) =>
+                  db.Database.ExecuteSqlAsync($"SELECT pg_advisory_xact_lock({TreeWriteLockKey})", ct);
+          }
+    done_when:
+      - Both files have exactly the content above; ProblemTypes no longer contains NotImplemented.
+
+  - id: 2
+    title: Seeder takes the write lock (Reset and SeedIfEmpty)
+    files:
+      - { path: backend/src/TreeEditor.Api/Data/TreeSeeder.cs, action: replace }
+    instructions:
+      - note: >
+          Only change versus stage 2: both public methods take DbLocks.AcquireTreeWriteLockAsync as the first
+          statement of their transaction, and SeedIfEmptyAsync checks emptiness inside the locked transaction.
+          ResetEndpoints.cs is NOT changed (it already calls seeder.ResetAsync).
+      - path: backend/src/TreeEditor.Api/Data/TreeSeeder.cs
+        content: |
+          using Microsoft.EntityFrameworkCore;
+          using Npgsql;
+          using TreeEditor.Api.Infrastructure;
+
+          namespace TreeEditor.Api.Data;
+
+          public sealed class TreeSeeder(TreeDbContext db)
+          {
+              private const string InsertSeedSql = """
+                  INSERT INTO nodes (id, parent_id, value, is_deleted)
+                  SELECT s.id, NULLIF(s.parent_id, 0), s.value, FALSE
+                  FROM unnest(@nodeIds, @parentIds, @nodeValues) AS s(id, parent_id, value)
+                  """;
+
+              private const string RestartSequenceSql =
+                  "SELECT setval(pg_get_serial_sequence('nodes', 'id'), (SELECT MAX(id) FROM nodes))";
+
+              private const string TruncateSql = "TRUNCATE TABLE nodes RESTART IDENTITY";
+
+              /// <summary>Inserts the seed when the table is empty. Returns true if it seeded.</summary>
+              public async Task<bool> SeedIfEmptyAsync(CancellationToken ct)
+              {
+                  await using var tx = await db.Database.BeginTransactionAsync(ct);
+                  await DbLocks.AcquireTreeWriteLockAsync(db, ct);
+
+                  if (await db.Nodes.AnyAsync(ct))
+                  {
+                      return false;
+                  }
+
+                  await InsertSeedAsync(ct);
+                  await tx.CommitAsync(ct);
+                  return true;
+              }
+
+              /// <summary>Deletes all rows and restores the seed with fixed ids, in one transaction.</summary>
+              public async Task ResetAsync(CancellationToken ct)
+              {
+                  await using var tx = await db.Database.BeginTransactionAsync(ct);
+                  await DbLocks.AcquireTreeWriteLockAsync(db, ct);
+                  await db.Database.ExecuteSqlRawAsync(TruncateSql, ct);
+                  await InsertSeedAsync(ct);
+                  await tx.CommitAsync(ct);
+                  db.ChangeTracker.Clear();
+              }
+
+              private async Task InsertSeedAsync(CancellationToken ct)
+              {
+                  var nodeIds = SeedData.Nodes.Select(n => n.Id).ToArray();
+                  var parentIds = SeedData.Nodes.Select(n => n.ParentId ?? 0L).ToArray();
+                  var nodeValues = SeedData.Nodes.Select(n => n.Value).ToArray();
+
+                  await db.Database.ExecuteSqlRawAsync(
+                      InsertSeedSql,
+                      new object[]
+                      {
+                          new NpgsqlParameter("nodeIds", nodeIds),
+                          new NpgsqlParameter("parentIds", parentIds),
+                          new NpgsqlParameter("nodeValues", nodeValues),
+                      },
+                      ct);
+
+                  await db.Database.ExecuteSqlRawAsync(RestartSequenceSql, ct);
+              }
+          }
+    done_when:
+      - File has exactly the content above.
+
+  - id: 3
+    title: Apply wire DTOs and validated command / outcome types
+    files:
+      - { path: backend/src/TreeEditor.Api/Features/Apply/ApplyDtos.cs, action: create }
+      - { path: backend/src/TreeEditor.Api/Features/Apply/ApplyCommand.cs, action: create }
+    instructions:
+      - path: backend/src/TreeEditor.Api/Features/Apply/ApplyDtos.cs
+        content: |
+          using TreeEditor.Api.Features.Nodes;
+
+          namespace TreeEditor.Api.Features.Apply;
+
+          /// <summary>
+          /// Body of POST /api/nodes/apply. Every member is nullable so the validator can report
+          /// missing fields as 400 with a JSON-path key instead of silently using defaults.
+          /// </summary>
+          public sealed class ApplyRequest
+          {
+              public List<ApplyEditItem?>? Edits { get; init; }
+
+              public List<ApplyAddItem?>? Adds { get; init; }
+
+              public List<long>? Deletes { get; init; }
+
+              public List<long>? RefreshIds { get; init; }
+          }
+
+          public sealed class ApplyEditItem
+          {
+              public long? Id { get; init; }
+
+              public string? Value { get; init; }
+          }
+
+          public sealed class ApplyAddItem
+          {
+              public string? TempId { get; init; }
+
+              public long? ParentId { get; init; }
+
+              public string? ParentTempId { get; init; }
+
+              public string? Value { get; init; }
+          }
+
+          /// <summary>idMap: tempId -> real id (insert order). nodes: post-apply NodeDetails ordered by id.</summary>
+          public sealed record ApplyResponse(IReadOnlyDictionary<string, long> IdMap, IReadOnlyList<NodeDetailsDto> Nodes);
+      - path: backend/src/TreeEditor.Api/Features/Apply/ApplyCommand.cs
+        content: |
+          namespace TreeEditor.Api.Features.Apply;
+
+          public sealed record ValidatedEdit(long Id, string Value);
+
+          /// <summary>Exactly one of ParentId / ParentTempId is non-null. Value is already trimmed.</summary>
+          public sealed record ValidatedAdd(string TempId, long? ParentId, string? ParentTempId, string Value);
+
+          /// <summary>
+          /// A request that passed validation. Adds are in insert order (parents before children);
+          /// DeleteIds and RefreshIds are de-duplicated.
+          /// </summary>
+          public sealed record ApplyCommand(
+              IReadOnlyList<ValidatedEdit> Edits,
+              IReadOnlyList<ValidatedAdd> Adds,
+              IReadOnlyList<long> DeleteIds,
+              IReadOnlyList<long> RefreshIds);
+
+          public abstract record ApplyOutcome
+          {
+              public sealed record Success(ApplyResponse Response) : ApplyOutcome;
+
+              /// <summary>Referenced real ids that do not exist, sorted ascending.</summary>
+              public sealed record NotFound(IReadOnlyList<long> NodeIds) : ApplyOutcome;
+
+              /// <summary>Edit targets / real add parents already deleted before the request, sorted ascending.</summary>
+              public sealed record Conflict(IReadOnlyList<long> NodeIds) : ApplyOutcome;
+          }
+    done_when:
+      - Both files have exactly the content above.
+
+  - id: 4
+    title: Validator (pure, runs before any DB access)
+    files:
+      - { path: backend/src/TreeEditor.Api/Features/Apply/ApplyValidator.cs, action: create }
+    instructions:
+      - path: backend/src/TreeEditor.Api/Features/Apply/ApplyValidator.cs
+        content: |
+          using System.Diagnostics.CodeAnalysis;
+
+          namespace TreeEditor.Api.Features.Apply;
+
+          /// <summary>
+          /// Shape and value validation of an apply request (contract v2 apply_semantics). No database access.
+          /// Error keys are JSON paths: edits, adds, deletes, refreshIds, edits[i], edits[i].id, edits[i].value,
+          /// adds[i], adds[i].tempId, adds[i].parentTempId, adds[i].value.
+          /// </summary>
+          public static class ApplyValidator
+          {
+              public const int MaxEdits = 1000;
+              public const int MaxAdds = 1000;
+              public const int MaxDeletes = 1000;
+              public const int MaxRefreshIds = 10000;
+              public const int MaxTempIdLength = 64;
+              public const int MaxValueLength = 200;
+
+              public static bool TryValidate(
+                  ApplyRequest request,
+                  [NotNullWhen(true)] out ApplyCommand? command,
+                  out Dictionary<string, string[]> errors)
+              {
+                  var found = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+
+                  CheckArray(request.Edits, "edits", MaxEdits, required: true, found);
+                  CheckArray(request.Adds, "adds", MaxAdds, required: true, found);
+                  CheckArray(request.Deletes, "deletes", MaxDeletes, required: true, found);
+                  CheckArray(request.RefreshIds, "refreshIds", MaxRefreshIds, required: false, found);
+
+                  var edits = new List<ValidatedEdit>();
+                  var adds = new List<ValidatedAdd>();
+                  if (found.Count == 0)
+                  {
+                      edits = ValidateEdits(request.Edits!, found);
+                      adds = ValidateAdds(request.Adds!, found);
+                  }
+
+                  if (found.Count > 0)
+                  {
+                      command = null;
+                      errors = found.ToDictionary(kv => kv.Key, kv => kv.Value.ToArray(), StringComparer.Ordinal);
+                      return false;
+                  }
+
+                  command = new ApplyCommand(
+                      edits,
+                      adds,
+                      request.Deletes!.Distinct().ToArray(),
+                      request.RefreshIds?.Distinct().ToArray() ?? Array.Empty<long>());
+                  errors = new Dictionary<string, string[]>(StringComparer.Ordinal);
+                  return true;
+              }
+
+              private static void CheckArray<T>(
+                  List<T>? items,
+                  string key,
+                  int max,
+                  bool required,
+                  Dictionary<string, List<string>> errors)
+              {
+                  if (items is null)
+                  {
+                      if (required)
+                      {
+                          AddError(errors, key, $"The '{key}' array is required.");
+                      }
+
+                      return;
+                  }
+
+                  if (items.Count > max)
+                  {
+                      AddError(errors, key, $"At most {max} items are allowed in '{key}'.");
+                  }
+              }
+
+              private static List<ValidatedEdit> ValidateEdits(
+                  List<ApplyEditItem?> items,
+                  Dictionary<string, List<string>> errors)
+              {
+                  var result = new List<ValidatedEdit>(items.Count);
+                  var seenIds = new HashSet<long>();
+
+                  for (var i = 0; i < items.Count; i++)
+                  {
+                      var path = $"edits[{i}]";
+                      var item = items[i];
+                      if (item is null)
+                      {
+                          AddError(errors, path, "Edit item must not be null.");
+                          continue;
+                      }
+
+                      if (item.Id is not { } id)
+                      {
+                          AddError(errors, $"{path}.id", "id is required.");
+                      }
+                      else if (!seenIds.Add(id))
+                      {
+                          AddError(errors, $"{path}.id", $"Duplicate edit id {id}.");
+                      }
+
+                      var value = NormalizeValue(item.Value, $"{path}.value", errors);
+                      if (item.Id is { } validId && value is not null)
+                      {
+                          result.Add(new ValidatedEdit(validId, value));
+                      }
+                  }
+
+                  return result;
+              }
+
+              private static List<ValidatedAdd> ValidateAdds(
+                  List<ApplyAddItem?> items,
+                  Dictionary<string, List<string>> errors)
+              {
+                  // All add error keys start with "adds[", so a growing key count means an add failed.
+                  var keyCountBefore = errors.Count;
+                  var indexByTempId = new Dictionary<string, int>(StringComparer.Ordinal);
+                  var values = new string?[items.Count];
+
+                  for (var i = 0; i < items.Count; i++)
+                  {
+                      var path = $"adds[{i}]";
+                      var item = items[i];
+                      if (item is null)
+                      {
+                          AddError(errors, path, "Add item must not be null.");
+                          continue;
+                      }
+
+                      if (string.IsNullOrEmpty(item.TempId))
+                      {
+                          AddError(errors, $"{path}.tempId", "tempId is required and must not be empty.");
+                      }
+                      else if (item.TempId.Length > MaxTempIdLength)
+                      {
+                          AddError(errors, $"{path}.tempId", $"tempId must be at most {MaxTempIdLength} characters.");
+                      }
+                      else if (!indexByTempId.TryAdd(item.TempId, i))
+                      {
+                          AddError(errors, $"{path}.tempId", $"Duplicate tempId '{item.TempId}'.");
+                      }
+
+                      if ((item.ParentId is null) == (item.ParentTempId is null))
+                      {
+                          AddError(errors, path, "Exactly one of parentId or parentTempId must be set.");
+                      }
+
+                      values[i] = NormalizeValue(item.Value, $"{path}.value", errors);
+                  }
+
+                  if (errors.Count > keyCountBefore)
+                  {
+                      return new List<ValidatedAdd>();
+                  }
+
+                  for (var i = 0; i < items.Count; i++)
+                  {
+                      var parentTempId = items[i]!.ParentTempId;
+                      if (parentTempId is not null && !indexByTempId.ContainsKey(parentTempId))
+                      {
+                          AddError(
+                              errors,
+                              $"adds[{i}].parentTempId",
+                              $"Unknown parentTempId '{parentTempId}': no add in this request has that tempId.");
+                      }
+                  }
+
+                  if (errors.Count > keyCountBefore)
+                  {
+                      return new List<ValidatedAdd>();
+                  }
+
+                  // Kahn's algorithm, breadth-first: real-parent adds in request order, then their
+                  // temp children level by level in request order. Parents always precede children.
+                  var children = new List<int>[items.Count];
+                  for (var i = 0; i < items.Count; i++)
+                  {
+                      children[i] = new List<int>();
+                  }
+
+                  var queue = new Queue<int>();
+                  for (var i = 0; i < items.Count; i++)
+                  {
+                      var parentTempId = items[i]!.ParentTempId;
+                      if (parentTempId is null)
+                      {
+                          queue.Enqueue(i);
+                      }
+                      else
+                      {
+                          children[indexByTempId[parentTempId]].Add(i);
+                      }
+                  }
+
+                  var order = new List<int>(items.Count);
+                  while (queue.TryDequeue(out var index))
+                  {
+                      order.Add(index);
+                      foreach (var child in children[index])
+                      {
+                          queue.Enqueue(child);
+                      }
+                  }
+
+                  if (order.Count < items.Count)
+                  {
+                      var placed = new HashSet<int>(order);
+                      for (var i = 0; i < items.Count; i++)
+                      {
+                          if (!placed.Contains(i))
+                          {
+                              AddError(
+                                  errors,
+                                  $"adds[{i}].parentTempId",
+                                  "parentTempId chain forms a cycle and never reaches a real parentId.");
+                          }
+                      }
+
+                      return new List<ValidatedAdd>();
+                  }
+
+                  return order
+                      .Select(i =>
+                      {
+                          var item = items[i]!;
+                          return new ValidatedAdd(item.TempId!, item.ParentId, item.ParentTempId, values[i]!);
+                      })
+                      .ToList();
+              }
+
+              /// <summary>Trims and checks length 1..200 in Unicode code points (same unit as PostgreSQL char_length).</summary>
+              private static string? NormalizeValue(string? raw, string key, Dictionary<string, List<string>> errors)
+              {
+                  if (raw is null)
+                  {
+                      AddError(errors, key, "value is required.");
+                      return null;
+                  }
+
+                  var trimmed = raw.Trim();
+                  if (!TryCountCodePoints(trimmed, out var length))
+                  {
+                      AddError(errors, key, "value must not contain NUL characters or unpaired surrogates.");
+                      return null;
+                  }
+
+                  if (length == 0)
+                  {
+                      AddError(errors, key, "value must not be empty or whitespace only.");
+                      return null;
+                  }
+
+                  if (length > MaxValueLength)
+                  {
+                      AddError(errors, key, $"value must be at most {MaxValueLength} characters after trimming.");
+                      return null;
+                  }
+
+                  return trimmed;
+              }
+
+              private static bool TryCountCodePoints(string text, out int count)
+              {
+                  count = 0;
+                  for (var i = 0; i < text.Length; i++)
+                  {
+                      var c = text[i];
+                      if (c == '\0' || char.IsLowSurrogate(c))
+                      {
+                          return false;
+                      }
+
+                      if (char.IsHighSurrogate(c))
+                      {
+                          if (i + 1 >= text.Length || !char.IsLowSurrogate(text[i + 1]))
+                          {
+                              return false;
+                          }
+
+                          i++;
+                      }
+
+                      count++;
+                  }
+
+                  return true;
+              }
+
+              private static void AddError(Dictionary<string, List<string>> errors, string key, string message)
+              {
+                  if (!errors.TryGetValue(key, out var messages))
+                  {
+                      messages = new List<string>();
+                      errors[key] = messages;
+                  }
+
+                  messages.Add(message);
+              }
+          }
+    done_when:
+      - File has exactly the content above and compiles without warnings.
+
+  - id: 5
+    title: Apply SQL, problems, service
+    files:
+      - { path: backend/src/TreeEditor.Api/Features/Apply/ApplySql.cs, action: create }
+      - { path: backend/src/TreeEditor.Api/Features/Apply/ApplyProblems.cs, action: create }
+      - { path: backend/src/TreeEditor.Api/Features/Apply/ApplyService.cs, action: create }
+    instructions:
+      - path: backend/src/TreeEditor.Api/Features/Apply/ApplySql.cs
+        content: |
+          namespace TreeEditor.Api.Features.Apply;
+
+          /// <summary>Set-based SQL used by ApplyService. Parameters are Npgsql named parameters.</summary>
+          internal static class ApplySql
+          {
+              /// <summary>@ids bigint[]. Locks referenced rows in id order; missing ids simply produce no row.</summary>
+              public const string LockReferencedNodes = """
+                  SELECT id, is_deleted
+                  FROM nodes
+                  WHERE id = ANY(@ids)
+                  ORDER BY id
+                  FOR UPDATE
+                  """;
+
+              /// <summary>@count integer. Returns @count new ids from the identity sequence, ascending.</summary>
+              public const string AllocateIds = """
+                  SELECT nextval(pg_get_serial_sequence('nodes', 'id'))
+                  FROM generate_series(1, @count)
+                  ORDER BY 1
+                  """;
+
+              /// <summary>@ids bigint[], @parentIds bigint[], @nodeValues text[]. FK is checked at end of statement.</summary>
+              public const string InsertAdds = """
+                  INSERT INTO nodes (id, parent_id, value, is_deleted)
+                  SELECT a.id, a.parent_id, a.value, FALSE
+                  FROM unnest(@ids, @parentIds, @nodeValues) AS a(id, parent_id, value)
+                  """;
+
+              /// <summary>@ids bigint[], @nodeValues text[].</summary>
+              public const string UpdateEdits = """
+                  UPDATE nodes AS n
+                  SET value = e.value
+                  FROM unnest(@ids, @nodeValues) AS e(id, value)
+                  WHERE n.id = e.id
+                  """;
+
+              /// <summary>@ids bigint[]. Soft-deletes the ids and all their DB descendants (loaded or not).</summary>
+              public const string CascadeDelete = """
+                  WITH RECURSIVE subtree AS (
+                      SELECT n.id FROM nodes n WHERE n.id = ANY(@ids)
+                      UNION
+                      SELECT c.id FROM nodes c JOIN subtree s ON c.parent_id = s.id
+                  )
+                  UPDATE nodes SET is_deleted = TRUE
+                  WHERE id IN (SELECT id FROM subtree) AND is_deleted = FALSE
+                  """;
+
+              /// <summary>
+              /// @ids bigint[]. NodeDetails for every existing id (missing ids are skipped), ordered by id.
+              /// Columns: id, parent_id, value, is_deleted, has_children, ancestor_ids (root -> parent).
+              /// </summary>
+              public const string LoadNodeDetails = """
+                  WITH RECURSIVE targets AS (
+                      SELECT n.id, n.parent_id, n.value, n.is_deleted
+                      FROM nodes n
+                      WHERE n.id = ANY(@ids)
+                  ),
+                  ancestors AS (
+                      SELECT t.id AS origin_id, p.id AS ancestor_id, p.parent_id, 1 AS depth
+                      FROM targets t
+                      JOIN nodes p ON p.id = t.parent_id
+                      UNION ALL
+                      SELECT a.origin_id, p.id, p.parent_id, a.depth + 1
+                      FROM ancestors a
+                      JOIN nodes p ON p.id = a.parent_id
+                  ),
+                  ancestor_lists AS (
+                      SELECT origin_id, array_agg(ancestor_id ORDER BY depth DESC) AS ancestor_ids
+                      FROM ancestors
+                      GROUP BY origin_id
+                  )
+                  SELECT t.id,
+                         t.parent_id,
+                         t.value,
+                         t.is_deleted,
+                         EXISTS (SELECT 1 FROM nodes c WHERE c.parent_id = t.id) AS has_children,
+                         COALESCE(l.ancestor_ids, ARRAY[]::bigint[]) AS ancestor_ids
+                  FROM targets t
+                  LEFT JOIN ancestor_lists l ON l.origin_id = t.id
+                  ORDER BY t.id
+                  """;
+          }
+      - path: backend/src/TreeEditor.Api/Features/Apply/ApplyProblems.cs
+        content: |
+          using TreeEditor.Api.Infrastructure;
+
+          namespace TreeEditor.Api.Features.Apply;
+
+          public static class ApplyProblems
+          {
+              public static IResult Validation(Dictionary<string, string[]> errors) =>
+                  Results.ValidationProblem(
+                      errors,
+                      detail: "The apply request is invalid; nothing was changed.",
+                      statusCode: StatusCodes.Status400BadRequest,
+                      title: "One or more validation errors occurred.",
+                      type: ProblemTypes.BadRequest);
+
+              public static IResult NotFound(IReadOnlyList<long> nodeIds) =>
+                  Results.Problem(
+                      detail: $"Node(s) {string.Join(", ", nodeIds)} do not exist; nothing was changed.",
+                      statusCode: StatusCodes.Status404NotFound,
+                      title: "Not Found",
+                      type: ProblemTypes.NotFound,
+                      extensions: new Dictionary<string, object?> { ["nodeIds"] = nodeIds.ToArray() });
+
+              public static IResult Conflict(IReadOnlyList<long> nodeIds) =>
+                  Results.Problem(
+                      detail: $"Node(s) {string.Join(", ", nodeIds)} are already deleted and cannot be edited or receive children; nothing was changed.",
+                      statusCode: StatusCodes.Status409Conflict,
+                      title: "Conflict",
+                      type: ProblemTypes.Conflict,
+                      extensions: new Dictionary<string, object?> { ["nodeIds"] = nodeIds.ToArray() });
+          }
+      - path: backend/src/TreeEditor.Api/Features/Apply/ApplyService.cs
+        content: |
+          using Microsoft.EntityFrameworkCore;
+          using Microsoft.EntityFrameworkCore.Storage;
+          using Npgsql;
+          using NpgsqlTypes;
+          using TreeEditor.Api.Data;
+          using TreeEditor.Api.Features.Nodes;
+          using TreeEditor.Api.Infrastructure;
+
+          namespace TreeEditor.Api.Features.Apply;
+
+          /// <summary>
+          /// Executes a validated apply command in one transaction serialized by DbLocks.
+          /// Order: lock -> 404 check -> 409 check -> adds (parents first) -> edits -> cascade deletes -> response.
+          /// Returning before CommitAsync disposes the transaction, which rolls back.
+          /// </summary>
+          public sealed class ApplyService(TreeDbContext db)
+          {
+              public async Task<ApplyOutcome> ApplyAsync(ApplyCommand command, CancellationToken ct)
+              {
+                  await using var transaction = await db.Database.BeginTransactionAsync(ct);
+                  await DbLocks.AcquireTreeWriteLockAsync(db, ct);
+
+                  var connection = (NpgsqlConnection)db.Database.GetDbConnection();
+                  var npgsqlTransaction = (NpgsqlTransaction)transaction.GetDbTransaction();
+
+                  var editIds = command.Edits.Select(e => e.Id).ToArray();
+                  var realParentIds = command.Adds
+                      .Where(a => a.ParentId.HasValue)
+                      .Select(a => a.ParentId.GetValueOrDefault())
+                      .ToArray();
+                  var referencedIds = editIds.Concat(command.DeleteIds).Concat(realParentIds).Distinct().ToArray();
+
+                  var isDeletedById = await LockNodesAsync(connection, npgsqlTransaction, referencedIds, ct);
+
+                  var missingIds = referencedIds.Where(id => !isDeletedById.ContainsKey(id)).Order().ToArray();
+                  if (missingIds.Length > 0)
+                  {
+                      return new ApplyOutcome.NotFound(missingIds);
+                  }
+
+                  var conflictIds = editIds.Concat(realParentIds).Where(id => isDeletedById[id]).Distinct().Order().ToArray();
+                  if (conflictIds.Length > 0)
+                  {
+                      return new ApplyOutcome.Conflict(conflictIds);
+                  }
+
+                  var idMap = await InsertAddsAsync(connection, npgsqlTransaction, command.Adds, ct);
+                  await UpdateEditsAsync(connection, npgsqlTransaction, command.Edits, ct);
+                  await CascadeDeleteAsync(connection, npgsqlTransaction, command.DeleteIds, ct);
+
+                  var responseIds = editIds
+                      .Concat(command.DeleteIds)
+                      .Concat(idMap.Values)
+                      .Concat(command.RefreshIds)
+                      .Distinct()
+                      .ToArray();
+                  var nodes = await LoadNodeDetailsAsync(connection, npgsqlTransaction, responseIds, ct);
+
+                  await transaction.CommitAsync(ct);
+                  return new ApplyOutcome.Success(new ApplyResponse(idMap, nodes));
+              }
+
+              private static async Task<Dictionary<long, bool>> LockNodesAsync(
+                  NpgsqlConnection connection,
+                  NpgsqlTransaction transaction,
+                  long[] ids,
+                  CancellationToken ct)
+              {
+                  var isDeletedById = new Dictionary<long, bool>(ids.Length);
+                  if (ids.Length == 0)
+                  {
+                      return isDeletedById;
+                  }
+
+                  await using var cmd = new NpgsqlCommand(ApplySql.LockReferencedNodes, connection, transaction);
+                  cmd.Parameters.Add(BigintArray("ids", ids));
+                  await using var reader = await cmd.ExecuteReaderAsync(ct);
+                  while (await reader.ReadAsync(ct))
+                  {
+                      isDeletedById[reader.GetInt64(0)] = reader.GetBoolean(1);
+                  }
+
+                  return isDeletedById;
+              }
+
+              private static async Task<Dictionary<string, long>> InsertAddsAsync(
+                  NpgsqlConnection connection,
+                  NpgsqlTransaction transaction,
+                  IReadOnlyList<ValidatedAdd> adds,
+                  CancellationToken ct)
+              {
+                  var idMap = new Dictionary<string, long>(adds.Count, StringComparer.Ordinal);
+                  if (adds.Count == 0)
+                  {
+                      return idMap;
+                  }
+
+                  var newIds = await AllocateIdsAsync(connection, transaction, adds.Count, ct);
+
+                  var ids = new long[adds.Count];
+                  var parentIds = new long[adds.Count];
+                  var values = new string[adds.Count];
+                  for (var i = 0; i < adds.Count; i++)
+                  {
+                      var add = adds[i];
+                      ids[i] = newIds[i];
+                      idMap[add.TempId] = newIds[i];
+                      parentIds[i] = add.ParentId ?? idMap[add.ParentTempId!];
+                      values[i] = add.Value;
+                  }
+
+                  await using var cmd = new NpgsqlCommand(ApplySql.InsertAdds, connection, transaction);
+                  cmd.Parameters.Add(BigintArray("ids", ids));
+                  cmd.Parameters.Add(BigintArray("parentIds", parentIds));
+                  cmd.Parameters.Add(TextArray("nodeValues", values));
+                  await cmd.ExecuteNonQueryAsync(ct);
+
+                  return idMap;
+              }
+
+              private static async Task<List<long>> AllocateIdsAsync(
+                  NpgsqlConnection connection,
+                  NpgsqlTransaction transaction,
+                  int count,
+                  CancellationToken ct)
+              {
+                  var newIds = new List<long>(count);
+                  await using var cmd = new NpgsqlCommand(ApplySql.AllocateIds, connection, transaction);
+                  cmd.Parameters.Add(new NpgsqlParameter("count", NpgsqlDbType.Integer) { Value = count });
+                  await using var reader = await cmd.ExecuteReaderAsync(ct);
+                  while (await reader.ReadAsync(ct))
+                  {
+                      newIds.Add(reader.GetInt64(0));
+                  }
+
+                  return newIds;
+              }
+
+              private static async Task UpdateEditsAsync(
+                  NpgsqlConnection connection,
+                  NpgsqlTransaction transaction,
+                  IReadOnlyList<ValidatedEdit> edits,
+                  CancellationToken ct)
+              {
+                  if (edits.Count == 0)
+                  {
+                      return;
+                  }
+
+                  await using var cmd = new NpgsqlCommand(ApplySql.UpdateEdits, connection, transaction);
+                  cmd.Parameters.Add(BigintArray("ids", edits.Select(e => e.Id).ToArray()));
+                  cmd.Parameters.Add(TextArray("nodeValues", edits.Select(e => e.Value).ToArray()));
+                  await cmd.ExecuteNonQueryAsync(ct);
+              }
+
+              private static async Task CascadeDeleteAsync(
+                  NpgsqlConnection connection,
+                  NpgsqlTransaction transaction,
+                  IReadOnlyList<long> deleteIds,
+                  CancellationToken ct)
+              {
+                  if (deleteIds.Count == 0)
+                  {
+                      return;
+                  }
+
+                  await using var cmd = new NpgsqlCommand(ApplySql.CascadeDelete, connection, transaction);
+                  cmd.Parameters.Add(BigintArray("ids", deleteIds.ToArray()));
+                  await cmd.ExecuteNonQueryAsync(ct);
+              }
+
+              private static async Task<List<NodeDetailsDto>> LoadNodeDetailsAsync(
+                  NpgsqlConnection connection,
+                  NpgsqlTransaction transaction,
+                  long[] ids,
+                  CancellationToken ct)
+              {
+                  var nodes = new List<NodeDetailsDto>(ids.Length);
+                  if (ids.Length == 0)
+                  {
+                      return nodes;
+                  }
+
+                  await using var cmd = new NpgsqlCommand(ApplySql.LoadNodeDetails, connection, transaction);
+                  cmd.Parameters.Add(BigintArray("ids", ids));
+                  await using var reader = await cmd.ExecuteReaderAsync(ct);
+                  while (await reader.ReadAsync(ct))
+                  {
+                      long? parentId = reader.IsDBNull(1) ? null : reader.GetInt64(1);
+                      nodes.Add(new NodeDetailsDto(
+                          reader.GetInt64(0),
+                          parentId,
+                          reader.GetString(2),
+                          reader.GetBoolean(3),
+                          reader.GetBoolean(4),
+                          reader.GetFieldValue<long[]>(5)));
+                  }
+
+                  return nodes;
+              }
+
+              private static NpgsqlParameter BigintArray(string name, long[] values) =>
+                  new(name, NpgsqlDbType.Array | NpgsqlDbType.Bigint) { Value = values };
+
+              private static NpgsqlParameter TextArray(string name, string[] values) =>
+                  new(name, NpgsqlDbType.Array | NpgsqlDbType.Text) { Value = values };
+          }
+    done_when:
+      - The three files have exactly the content above and compile without warnings.
+
+  - id: 6
+    title: Apply endpoint (replaces the 501 stub) and Program.cs registration
+    files:
+      - { path: backend/src/TreeEditor.Api/Features/Apply/ApplyEndpoints.cs, action: replace }
+      - { path: backend/src/TreeEditor.Api/Program.cs, action: replace }
+    instructions:
+      - path: backend/src/TreeEditor.Api/Features/Apply/ApplyEndpoints.cs
+        content: |
+          using System.Text.Json;
+          using Microsoft.Extensions.Options;
+          using HttpJsonOptions = Microsoft.AspNetCore.Http.Json.JsonOptions;
+
+          namespace TreeEditor.Api.Features.Apply;
+
+          public static class ApplyEndpoints
+          {
+              public static IEndpointRouteBuilder MapApplyEndpoints(this IEndpointRouteBuilder app)
+              {
+                  var group = app.MapGroup("/api/nodes");
+                  group.MapPost("/apply", ApplyAsync);
+                  return app;
+              }
+
+              // The body is read manually (no [FromBody]) so that a missing, empty or malformed body with any
+              // or no Content-Type yields 400 ValidationProblemDetails with key "body" instead of 415/plain 400.
+              private static async Task<IResult> ApplyAsync(
+                  HttpRequest httpRequest,
+                  ApplyService service,
+                  IOptions<HttpJsonOptions> jsonOptions,
+                  CancellationToken ct)
+              {
+                  ApplyRequest? request;
+                  try
+                  {
+                      request = await JsonSerializer.DeserializeAsync<ApplyRequest>(
+                          httpRequest.Body,
+                          jsonOptions.Value.SerializerOptions,
+                          ct);
+                  }
+                  catch (JsonException ex)
+                  {
+                      return ApplyProblems.Validation(new Dictionary<string, string[]>
+                      {
+                          ["body"] = new[] { $"Request body is not a valid ApplyRequest JSON object: {ex.Message}" },
+                      });
+                  }
+
+                  if (request is null)
+                  {
+                      return ApplyProblems.Validation(new Dictionary<string, string[]>
+                      {
+                          ["body"] = new[] { "Request body is required." },
+                      });
+                  }
+
+                  if (!ApplyValidator.TryValidate(request, out var command, out var errors))
+                  {
+                      return ApplyProblems.Validation(errors);
+                  }
+
+                  var outcome = await service.ApplyAsync(command, ct);
+                  return outcome switch
+                  {
+                      ApplyOutcome.Success success => Results.Ok(success.Response),
+                      ApplyOutcome.NotFound notFound => ApplyProblems.NotFound(notFound.NodeIds),
+                      ApplyOutcome.Conflict conflict => ApplyProblems.Conflict(conflict.NodeIds),
+                      _ => throw new InvalidOperationException($"Unhandled apply outcome {outcome.GetType().Name}."),
+                  };
+              }
+          }
+      - path: backend/src/TreeEditor.Api/Program.cs
+        content: |
+          using System.Text.Json;
+          using Microsoft.EntityFrameworkCore;
+          using TreeEditor.Api.Data;
+          using TreeEditor.Api.Features.Apply;
+          using TreeEditor.Api.Features.Health;
+          using TreeEditor.Api.Features.Nodes;
+          using TreeEditor.Api.Features.Reset;
+
+          var builder = WebApplication.CreateBuilder(args);
+
+          builder.Services.AddProblemDetails();
+          builder.Services.ConfigureHttpJsonOptions(options =>
+          {
+              options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+          });
+
+          // Connection string is resolved lazily so test hosts can override it via UseSetting.
+          builder.Services.AddDbContext<TreeDbContext>((services, options) =>
+          {
+              var connectionString = services.GetRequiredService<IConfiguration>().GetConnectionString("Default")
+                  ?? throw new InvalidOperationException("Connection string 'ConnectionStrings:Default' is not configured.");
+              options.UseNpgsql(connectionString);
+          });
+          builder.Services.AddScoped<TreeSeeder>();
+          builder.Services.AddScoped<ApplyService>();
+
+          var app = builder.Build();
+
+          app.UseExceptionHandler();
+          app.UseStatusCodePages();
+
+          await DatabaseInitializer.InitializeAsync(app.Services, app.Lifetime.ApplicationStopping);
+
+          app.MapHealthEndpoints();
+          app.MapNodeEndpoints();
+          app.MapResetEndpoints();
+          app.MapApplyEndpoints();
+
+          app.Run();
+
+          public partial class Program
+          {
+          }
+    done_when:
+      - Both files have exactly the content above (Program.cs differs from stage 2 only by the AddScoped<ApplyService>() line).
+      - "`grep -rn '--include=*.cs' --exclude-dir=bin --exclude-dir=obj \"NotImplemented\\|501\" backend/src` prints nothing."
+
+  - id: 7
+    title: Remove the stage-2 apply stub test
+    files:
+      - { path: backend/tests/TreeEditor.Api.Tests/Apply/ApplyStubTests.cs, action: delete }
+    instructions:
+      - run_from: /Users/maczone/Desktop/personal/test_qit
+        commands:
+          - rm backend/tests/TreeEditor.Api.Tests/Apply/ApplyStubTests.cs
+      - note: Do not write new Apply tests; docs-and-tests implements test_matrix below.
+    done_when:
+      - "The file no longer exists; `grep -rn '--include=*.cs' --exclude-dir=bin --exclude-dir=obj \"NotImplemented\\|501\" backend/tests` prints nothing."
+
+  - id: 8
+    title: Overridable host ports in docker-compose.yml
+    files:
+      - { path: docker-compose.yml, action: replace }
+    instructions:
+      - note: Only the three host-port strings change. Service names, container ports, env, volumes, healthcheck and depends_on stay identical.
+      - path: docker-compose.yml
+        content: |
+          services:
+            db:
+              image: postgres:16
+              environment:
+                POSTGRES_DB: treeeditor
+                POSTGRES_USER: tree
+                POSTGRES_PASSWORD: tree
+              ports:
+                - "${DB_PORT:-5432}:5432"
+              volumes:
+                - dbdata:/var/lib/postgresql/data
+              healthcheck:
+                test: ["CMD-SHELL", "pg_isready -U tree -d treeeditor"]
+                interval: 2s
+                timeout: 3s
+                retries: 30
+
+            api:
+              build:
+                context: ./backend
+                dockerfile: Dockerfile
+              environment:
+                ASPNETCORE_ENVIRONMENT: Production
+                ASPNETCORE_URLS: http://+:8080
+                ConnectionStrings__Default: Host=db;Port=5432;Database=treeeditor;Username=tree;Password=tree
+              ports:
+                - "${API_PORT:-8080}:8080"
+              depends_on:
+                db:
+                  condition: service_healthy
+
+            ui:
+              build:
+                context: ./frontend
+                dockerfile: Dockerfile
+              ports:
+                - "${UI_PORT:-3000}:80"
+              depends_on:
+                api:
+                  condition: service_started
+
+          volumes:
+            dbdata:
+    done_when:
+      - "`docker compose config --quiet` exits 0."
+      - "`docker compose config | grep 'published:'` prints published \"5432\", \"8080\" and \"3000\" (defaults)."
+      - "`API_PORT=18080 docker compose config | grep -c 'published: \"18080\"'` prints 1."
+
+  - id: 9
+    title: Build, model drift and existing tests
+    files: []
+    instructions:
+      - run_from: /Users/maczone/Desktop/personal/test_qit/backend
+        commands:
+          - dotnet build TreeEditor.sln -c Release --no-incremental
+          - dotnet tool restore
+          - dotnet ef migrations has-pending-model-changes --project src/TreeEditor.Api/TreeEditor.Api.csproj --startup-project src/TreeEditor.Api/TreeEditor.Api.csproj
+          - dotnet test TreeEditor.sln
+      - note: If the build reports any warning or the test run fails, stop and report the exact output (do not change code outside this plan).
+    done_when:
+      - Build prints "0 Warning(s)" and "0 Error(s)".
+      - has-pending-model-changes exits 0 with "No changes have been made to the model since the last migration."
+      - All existing tests pass (stage-2 suite minus the deleted stub tests).
+
+# ---------------------------------------------------------------------------
+# Test matrix — implemented by docs-and-tests (NOT by plan-implementer).
+# Infrastructure from stage 2: every class derives IntegrationTestBase (DB reset
+# to seed before each test) and carries [Collection(ApiCollection.Name)].
+# Send bodies as raw JSON strings via
+#   new StringContent(json, Encoding.UTF8, "application/json")
+# so shape errors can be produced. Deserialize success bodies with
+# ReadFromJsonAsync<TreeEditor.Api.Features.Apply.ApplyResponse>(); 400 bodies with
+# ReadFromJsonAsync<Microsoft.AspNetCore.Http.HttpValidationProblemDetails>();
+# 404/409 with ReadFromJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>() and
+# read "nodeIds" from problem.Extensions (JsonElement). Seed: ids 1..30, next id 31.
+# Subtree of 1 = {1,4,5,6,10,11,12,13,18,19,20,21,26,27} (14 nodes).
+# Invariant SQL (must return 0):
+#   SELECT count(*) FROM nodes c JOIN nodes p ON p.id = c.parent_id WHERE p.is_deleted AND NOT c.is_deleted
+# ---------------------------------------------------------------------------
+test_matrix:
+  files:
+    - path: backend/tests/TreeEditor.Api.Tests/Apply/ApplyHappyPathTests.cs
+      cases:
+        - "Empty request {\"edits\":[],\"adds\":[],\"deletes\":[]} -> 200, body exactly {\"idMap\":{},\"nodes\":[]}"
+        - "refreshIds only: {\"edits\":[],\"adds\":[],\"deletes\":[],\"refreshIds\":[3,999999,3]} -> 200; nodes == [node 3] (missing id ignored, duplicates removed); DB unchanged"
+        - "Edit trims value: edits [{id:11,value:\"  Desktop PCs  \"}] -> 200; nodes[0].value \"Desktop PCs\"; GET /api/nodes/11 value \"Desktop PCs\""
+        - "Add under real parent: adds [{tempId:\"tmp-1\",parentId:30,value:\"New\"}] -> idMap {tmp-1:31}; nodes [31] with parentId 30, ancestorIds [3,9,17,25,30], hasChildren false, isDeleted false"
+        - "Temp-id chain, request order reversed: adds [{tmp-2,parentTempId tmp-1,\"Grandchild\"},{tmp-1,parentId 11,\"Child\"}] -> idMap {tmp-1:31,tmp-2:32}; node 32 ancestorIds [1,4,11,31]; node 31 hasChildren true"
+        - "Three-level chain plus sibling: adds [{a,parentId 2},{b,parentTempId a},{c,parentTempId b},{d,parentId 3}] -> ids a=31,d=32,b=33,c=34 (breadth-first insert order); every child id greater than its parent id"
+        - "Response contains edit ids, delete ids, created ids and refreshIds, de-duplicated and ordered by id ascending (edits [5], deletes [27], adds [{t,parentId 2}], refreshIds [27,1,5] -> ids [1,5,27,31])"
+        - "Mixed batch edit + add + delete of unrelated nodes all persist (verify via GET /api/nodes/{id})"
+        - "Raw JSON response has property names idMap, nodes, id, parentId, value, isDeleted, hasChildren, ancestorIds (camelCase)"
+    - path: backend/tests/TreeEditor.Api.Tests/Apply/ApplyCascadeTests.cs
+      cases:
+        - "Delete 1 cascades to never-loaded descendants: deletes [1] -> 200; via WithDbAsync all 14 subtree ids have IsDeleted true and nodes 2,3 and their subtrees stay false; GET /api/nodes/26 isDeleted true"
+        - "refreshIds cascade visibility: deletes [1], refreshIds [26,27,2] -> nodes 1,2,26,27 with 26 and 27 isDeleted true, 2 false"
+        - "Cascade covers nodes added in an earlier apply: apply add under 26 (gets 31), then apply deletes [4] -> node 31 isDeleted true"
+        - "Same batch add under a node deleted in the same batch: adds [{t1,parentId 10},{t2,parentTempId t1}], deletes [4] -> 200; idMap has t1,t2; both created nodes come back isDeleted true"
+        - "Same batch edit of a descendant of a deleted node: edits [{26,\"x\"}], deletes [10] -> 200; node 26 value \"x\" and isDeleted true"
+        - "Idempotent re-delete: deletes [1] then deletes [1,1,26] -> both 200; second response nodes [1,26] isDeleted true; deleted count unchanged (14)"
+        - "Duplicate ids in deletes are de-duplicated (no error): deletes [5,5] -> 200, nodes [5]"
+        - "Invariant SQL returns 0 after every test in this file"
+    - path: backend/tests/TreeEditor.Api.Tests/Apply/ApplyValidationTests.cs
+      cases:
+        - "No body (PostAsync with null content) -> 400 application/problem+json; errors has key \"body\""
+        - "Body with Content-Type text/plain containing valid JSON -> NOT 415 (200 for an empty request)"
+        - "Malformed JSON \"{\\\"edits\\\":\" -> 400 key \"body\"; JSON literal null -> 400 key \"body\"; JSON array [] -> 400 key \"body\""
+        - "Wrong type: {\"edits\":[{\"id\":\"abc\",\"value\":\"x\"}],\"adds\":[],\"deletes\":[]} -> 400 key \"body\""
+        - "Missing arrays: {} -> 400 with keys edits, adds, deletes; refreshIds omitted is fine"
+        - "Value rules: \"   \" -> key edits[0].value; 201 chars after trim -> edits[0].value; exactly 200 chars -> 200; value missing -> edits[0].value; same three for adds[0].value"
+        - "Value length counted in code points: 200 emoji (U+1F600, 400 UTF-16 chars) -> 200 OK; 201 emoji -> 400"
+        - "Value with NUL \\u0000 -> 400 edits[0].value"
+        - "Edit id missing -> edits[0].id; duplicate edit id (edits [{2,a},{2,b}]) -> key edits[1].id"
+        - "tempId empty -> adds[0].tempId; tempId 65 chars -> adds[0].tempId; 64 chars -> OK; duplicate tempId -> adds[1].tempId"
+        - "Neither parentId nor parentTempId -> key adds[0]; both set -> key adds[0]"
+        - "Unknown parentTempId -> key adds[0].parentTempId"
+        - "Cycle: adds [{a,parentTempId b},{b,parentTempId a}] -> keys adds[0].parentTempId and adds[1].parentTempId; self-cycle {a,parentTempId a} -> adds[0].parentTempId"
+        - "Limits: 1001 edits -> key edits; 1001 adds -> adds; 1001 deletes -> deletes; 10001 refreshIds -> refreshIds; exactly 1000 deletes of ids 1..1000 is not a 400 (expect 404 for the missing ids 31..1000)"
+        - "400 is returned before DB access: body with an invalid value AND a missing edit id 999999 -> 400 (not 404); nothing persisted"
+        - "Validation response: status 400, title \"One or more validation errors occurred.\", type https://tools.ietf.org/html/rfc9110#section-15.5.1"
+    - path: backend/tests/TreeEditor.Api.Tests/Apply/ApplyErrorTests.cs
+      cases:
+        - "404 edit of missing id 999999 -> 404 problem+json, title \"Not Found\", nodeIds [999999]"
+        - "404 delete of missing id; 404 add with parentId 999999; multiple missing ids -> nodeIds sorted ascending"
+        - "409 edit of a node already deleted (arrange: WithDbAsync set node 5 IsDeleted true) -> 409, title \"Conflict\", nodeIds [5]"
+        - "409 add under an already-deleted real parent -> 409 nodeIds [parent]"
+        - "Precedence 404 over 409: edits [{5 (deleted),x}], deletes [999999] -> 404"
+        - "Nothing persisted on 404/409: request also containing a valid add and a valid edit -> after the error Nodes.Count()==30 and the edited value unchanged"
+    - path: backend/tests/TreeEditor.Api.Tests/Apply/ApplyAtomicityTests.cs
+      cases:
+        - >-
+          Rollback on a failing later operation: in WithDbAsync ExecuteSqlRawAsync create
+          FUNCTION test_fail_on_boom() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.value = 'boom' THEN RAISE EXCEPTION 'boom'; END IF; RETURN NEW; END; $$
+          and TRIGGER trg_test_fail_on_boom BEFORE UPDATE OF value ON nodes FOR EACH ROW EXECUTE FUNCTION test_fail_on_boom().
+          Apply adds [{t1,parentId 2,"New"}], edits [{3,"boom"}], deletes [7] -> 500 problem+json.
+          Assert: Nodes.Count()==30, node 3 value "Home and Garden", node 7 IsDeleted false.
+          In finally: DROP TRIGGER IF EXISTS trg_test_fail_on_boom ON nodes; DROP FUNCTION IF EXISTS test_fail_on_boom() (Reset does not drop triggers).
+          Do not assert the next generated id (sequence values are consumed even on rollback).
+    - path: backend/tests/TreeEditor.Api.Tests/Apply/ApplyConcurrencyTests.cs
+      cases:
+        - >-
+          Advisory lock blocks apply: open a separate NpgsqlConnection to Factory.ConnectionString, run SELECT pg_advisory_lock(4242)
+          (use DbLocks.TreeWriteLockKey); start POST apply (empty request) without awaiting; Task.WhenAny with Task.Delay(500) -> apply not completed;
+          SELECT pg_advisory_unlock(4242); apply completes with 200 within 5 s.
+        - Same as above for POST /api/reset (Reset takes the same lock).
+        - >-
+          Parallel add vs ancestor cascade, 10 rounds: each round Factory.ResetDatabaseAsync(); start in parallel
+          A = apply adds [{t,parentId 26,"race"}] and B = apply deletes [1]; await both.
+          B is 200; A is 200 or 409; if A is 200 the created node is isDeleted true in DB; invariant SQL returns 0.
+    - path: backend/tests/TreeEditor.Api.Tests/Reset/ResetTests.cs
+      cases_to_add:
+        - "Reset after apply restores seed: apply edits [{1,\"x\"}], adds [{t,parentId 30}], deletes [2] -> POST /api/reset -> 30 rows equal SeedData, none deleted; next apply add under 30 gets idMap value 31"
+  must_pass_command: "cd backend && dotnet test TreeEditor.sln"
+
+# ---------------------------------------------------------------------------
+acceptance_criteria:
+  - id: AC1
+    check: "cd backend && dotnet build TreeEditor.sln -c Release --no-incremental"
+    expect: "Build succeeded. 0 Warning(s) 0 Error(s)"
+  - id: AC2
+    check: "cd backend && dotnet tool restore && dotnet ef migrations has-pending-model-changes --project src/TreeEditor.Api/TreeEditor.Api.csproj --startup-project src/TreeEditor.Api/TreeEditor.Api.csproj"
+    expect: "exit 0; 'No changes have been made to the model since the last migration.'"
+  - id: AC3
+    check: "cd backend && dotnet test TreeEditor.sln"
+    expect: "all tests pass (Docker running); after docs-and-tests, every test_matrix case is present and green"
+  - id: AC4
+    check: "grep -rn '--include=*.cs' --exclude-dir=bin --exclude-dir=obj \"NotImplemented\\|501\" backend/src backend/tests"
+    expect: "no output (exit 1)"
+  - id: AC5
+    check: "docker compose config --quiet && API_PORT=18080 docker compose config | grep -c 'published: \"18080\"'"
+    expect: "1"
+  - id: AC6
+    check: "docker compose up --build -d (repo root, no *_PORT variables set); wait until `curl -s http://localhost:8080/api/health` returns {\"status\":\"ok\"} (max 90 s)"
+    expect: "db, api, ui running"
+  - id: AC7
+    check: "Every command in `smoke` returns its expected result, executed in order."
+
+smoke:
+  preconditions: "AC6 done; run from repo root /Users/maczone/Desktop/personal/test_qit in zsh; commands run sequentially in this exact order"
+  commands:
+    - id: C1
+      run: curl -s -X POST http://localhost:8080/api/reset
+      expect_body: '[{"id":1,"parentId":null,"value":"Electronics","isDeleted":false,"hasChildren":true},{"id":2,"parentId":null,"value":"Books","isDeleted":false,"hasChildren":true},{"id":3,"parentId":null,"value":"Home and Garden","isDeleted":false,"hasChildren":true}]'
+    - id: C2
+      title: happy path, temp-id chain given child-first, trimmed edit, refreshIds
+      run: "curl -s -X POST http://localhost:8080/api/nodes/apply -H 'Content-Type: application/json' -d '{\"edits\":[{\"id\":11,\"value\":\"  Desktop PCs  \"}],\"adds\":[{\"tempId\":\"tmp-2\",\"parentTempId\":\"tmp-1\",\"value\":\"Grandchild\"},{\"tempId\":\"tmp-1\",\"parentId\":11,\"value\":\"Child\"}],\"deletes\":[],\"refreshIds\":[4]}'"
+      expect_body: '{"idMap":{"tmp-1":31,"tmp-2":32},"nodes":[{"id":4,"parentId":1,"value":"Computers","isDeleted":false,"hasChildren":true,"ancestorIds":[1]},{"id":11,"parentId":4,"value":"Desktop PCs","isDeleted":false,"hasChildren":true,"ancestorIds":[1,4]},{"id":31,"parentId":11,"value":"Child","isDeleted":false,"hasChildren":true,"ancestorIds":[1,4,11]},{"id":32,"parentId":31,"value":"Grandchild","isDeleted":false,"hasChildren":false,"ancestorIds":[1,4,11,31]}]}'
+    - id: C3
+      run: curl -s http://localhost:8080/api/nodes/32
+      expect_body: '{"id":32,"parentId":31,"value":"Grandchild","isDeleted":false,"hasChildren":false,"ancestorIds":[1,4,11,31]}'
+    - id: C4
+      title: cascade delete of root 1 (incl. never-loaded 26 and created 32), refreshIds show cascade
+      run: "curl -s -X POST http://localhost:8080/api/nodes/apply -H 'Content-Type: application/json' -d '{\"edits\":[],\"adds\":[],\"deletes\":[1],\"refreshIds\":[26,32,2]}'"
+      expect_body: '{"idMap":{},"nodes":[{"id":1,"parentId":null,"value":"Electronics","isDeleted":true,"hasChildren":true,"ancestorIds":[]},{"id":2,"parentId":null,"value":"Books","isDeleted":false,"hasChildren":true,"ancestorIds":[]},{"id":26,"parentId":18,"value":"Ultrabook 13-inch","isDeleted":true,"hasChildren":false,"ancestorIds":[1,4,10,18]},{"id":32,"parentId":31,"value":"Grandchild","isDeleted":true,"hasChildren":false,"ancestorIds":[1,4,11,31]}]}'
+    - id: C5
+      run: curl -s http://localhost:8080/api/nodes/26
+      expect_body: '{"id":26,"parentId":18,"value":"Ultrabook 13-inch","isDeleted":true,"hasChildren":false,"ancestorIds":[1,4,10,18]}'
+    - id: C6
+      title: deleted count = 14 seed nodes in subtree of 1 + created 31, 32
+      run: "docker compose exec -T db psql -U tree -d treeeditor -At -c \"SELECT count(*) FROM nodes WHERE is_deleted\""
+      expect_body: "16"
+    - id: C7
+      title: invariant — no non-deleted node has a deleted parent (hence no deleted ancestor)
+      run: "docker compose exec -T db psql -U tree -d treeeditor -At -c \"SELECT count(*) FROM nodes c JOIN nodes p ON p.id = c.parent_id WHERE p.is_deleted AND NOT c.is_deleted\""
+      expect_body: "0"
+    - id: C8
+      title: idempotent re-delete with duplicates
+      run: "curl -s -X POST http://localhost:8080/api/nodes/apply -H 'Content-Type: application/json' -d '{\"edits\":[],\"adds\":[],\"deletes\":[1,1,26]}'"
+      expect_body: '{"idMap":{},"nodes":[{"id":1,"parentId":null,"value":"Electronics","isDeleted":true,"hasChildren":true,"ancestorIds":[]},{"id":26,"parentId":18,"value":"Ultrabook 13-inch","isDeleted":true,"hasChildren":false,"ancestorIds":[1,4,10,18]}]}'
+    - id: C9
+      title: 409 edit of a deleted node
+      run: "curl -s -i -X POST http://localhost:8080/api/nodes/apply -H 'Content-Type: application/json' -d '{\"edits\":[{\"id\":5,\"value\":\"x\"}],\"adds\":[],\"deletes\":[]}'"
+      expect: 'status line "HTTP/1.1 409 Conflict"; header Content-Type: application/problem+json; body contains "title":"Conflict" and "status":409 and "nodeIds":[5]'
+    - id: C10
+      title: 409 add under a deleted real parent
+      run: "curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/api/nodes/apply -H 'Content-Type: application/json' -d '{\"edits\":[],\"adds\":[{\"tempId\":\"tmp-x\",\"parentId\":26,\"value\":\"x\"}],\"deletes\":[]}'"
+      expect_body: "409"
+    - id: C11
+      title: 404 missing id
+      run: "curl -s -i -X POST http://localhost:8080/api/nodes/apply -H 'Content-Type: application/json' -d '{\"edits\":[{\"id\":999999,\"value\":\"x\"}],\"adds\":[],\"deletes\":[]}'"
+      expect: 'status line "HTTP/1.1 404 Not Found"; header Content-Type: application/problem+json; body contains "title":"Not Found" and "status":404 and "nodeIds":[999999]'
+    - id: C12
+      title: precedence 404 over 409
+      run: "curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/api/nodes/apply -H 'Content-Type: application/json' -d '{\"edits\":[{\"id\":5,\"value\":\"x\"}],\"adds\":[],\"deletes\":[999999]}'"
+      expect_body: "404"
+    - id: C13
+      title: 400 blank value with JSON-path error key
+      run: "curl -s -i -X POST http://localhost:8080/api/nodes/apply -H 'Content-Type: application/json' -d '{\"edits\":[{\"id\":2,\"value\":\"   \"}],\"adds\":[],\"deletes\":[]}'"
+      expect: 'status line "HTTP/1.1 400 Bad Request"; header Content-Type: application/problem+json; body contains "status":400 and "errors":{"edits[0].value":['
+    - id: C14
+      title: 400 cycle
+      run: "curl -s -X POST http://localhost:8080/api/nodes/apply -H 'Content-Type: application/json' -d '{\"edits\":[],\"adds\":[{\"tempId\":\"a\",\"parentTempId\":\"b\",\"value\":\"A\"},{\"tempId\":\"b\",\"parentTempId\":\"a\",\"value\":\"B\"}],\"deletes\":[]}'"
+      expect: 'body contains "adds[0].parentTempId" and "adds[1].parentTempId" and "status":400'
+    - id: C15
+      title: 400 missing parent refs
+      run: "curl -s -X POST http://localhost:8080/api/nodes/apply -H 'Content-Type: application/json' -d '{\"edits\":[],\"adds\":[{\"tempId\":\"a\",\"value\":\"A\"}],\"deletes\":[]}'"
+      expect: 'body contains "errors":{"adds[0]":[ and "status":400'
+    - id: C16
+      title: 400 (not 415) for missing body and no Content-Type
+      run: curl -s -i -X POST http://localhost:8080/api/nodes/apply
+      expect: 'status line "HTTP/1.1 400 Bad Request"; body contains "errors":{"body":['
+    - id: C17
+      title: 400 for malformed JSON
+      run: "curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/api/nodes/apply -H 'Content-Type: application/json' -d '{\"edits\":'"
+      expect_body: "400"
+    - id: C18
+      title: empty request
+      run: "curl -s -X POST http://localhost:8080/api/nodes/apply -H 'Content-Type: application/json' -d '{\"edits\":[],\"adds\":[],\"deletes\":[]}'"
+      expect_body: '{"idMap":{},"nodes":[]}'
+    - id: C19
+      title: refreshIds only; missing ids ignored, duplicates removed
+      run: "curl -s -X POST http://localhost:8080/api/nodes/apply -H 'Content-Type: application/json' -d '{\"edits\":[],\"adds\":[],\"deletes\":[],\"refreshIds\":[3,999999,3]}'"
+      expect_body: '{"idMap":{},"nodes":[{"id":3,"parentId":null,"value":"Home and Garden","isDeleted":false,"hasChildren":true,"ancestorIds":[]}]}'
+    - id: C20
+      title: failed requests persisted nothing (only C2 created rows)
+      run: "docker compose exec -T db psql -U tree -d treeeditor -At -c \"SELECT count(*), max(id) FROM nodes\""
+      expect_body: "32|32"
+    - id: C21
+      title: concurrency smoke — parallel add under 26 vs delete of its ancestor 1
+      run: "curl -s -X POST http://localhost:8080/api/reset > /dev/null && (curl -s -o /dev/null -w 'add:%{http_code}\\n' -X POST http://localhost:8080/api/nodes/apply -H 'Content-Type: application/json' -d '{\"edits\":[],\"adds\":[{\"tempId\":\"race\",\"parentId\":26,\"value\":\"race\"}],\"deletes\":[]}' & curl -s -o /dev/null -w 'delete:%{http_code}\\n' -X POST http://localhost:8080/api/nodes/apply -H 'Content-Type: application/json' -d '{\"edits\":[],\"adds\":[],\"deletes\":[1]}' & wait)"
+      expect: "two lines in any order: delete:200 and add:200 or add:409"
+    - id: C22
+      run: "docker compose exec -T db psql -U tree -d treeeditor -At -c \"SELECT count(*) FROM nodes c JOIN nodes p ON p.id = c.parent_id WHERE p.is_deleted AND NOT c.is_deleted\""
+      expect_body: "0"
+    - id: C23
+      title: reset after apply restores the seed
+      run: curl -s -X POST http://localhost:8080/api/reset
+      expect_body: '[{"id":1,"parentId":null,"value":"Electronics","isDeleted":false,"hasChildren":true},{"id":2,"parentId":null,"value":"Books","isDeleted":false,"hasChildren":true},{"id":3,"parentId":null,"value":"Home and Garden","isDeleted":false,"hasChildren":true}]'
+    - id: C24
+      run: "docker compose exec -T db psql -U tree -d treeeditor -At -c \"SELECT count(*), max(id), bool_or(is_deleted) FROM nodes\""
+      expect_body: "30|30|f"
+    - id: C25
+      title: id sequence restarts at 31 after reset
+      run: "curl -s -X POST http://localhost:8080/api/nodes/apply -H 'Content-Type: application/json' -d '{\"edits\":[],\"adds\":[{\"tempId\":\"tmp-1\",\"parentId\":30,\"value\":\"After reset\"}],\"deletes\":[]}'"
+      expect_body: '{"idMap":{"tmp-1":31},"nodes":[{"id":31,"parentId":30,"value":"After reset","isDeleted":false,"hasChildren":false,"ancestorIds":[3,9,17,25,30]}]}'
+    - id: C26
+      run: curl -s -X POST http://localhost:8080/api/reset
+      expect: HTTP 200 (leaves the stack at the seed)
+  notes:
+    - Defaults are used (no DB_PORT/API_PORT/UI_PORT set). With API_PORT=18080 replace 8080 in every URL.
+    - Error bodies also contain a non-deterministic "traceId"; that is why error checks use "contains".
+
+# ---------------------------------------------------------------------------
+backend_claude_md_points:   # input for docs-and-tests when updating backend/CLAUDE.md (replace the "501 stub" line)
+  - "Apply layout: Features/Apply/ — ApplyEndpoints (MapGroup /api/nodes, body read manually from HttpRequest so bad/missing body -> 400 key 'body'), ApplyDtos (wire types, all nullable), ApplyValidator (pure, JSON-path error keys, limits, Kahn topological order), ApplyCommand (validated command + ApplyOutcome), ApplySql (raw set-based SQL), ApplyService (transaction), ApplyProblems (400/404/409)."
+  - "Apply order inside one transaction: advisory lock -> SELECT ... FOR UPDATE referenced rows -> 404 -> 409 -> adds (ids pre-allocated via nextval, one INSERT ... unnest) -> edits (one UPDATE ... unnest) -> cascade delete (one recursive CTE) -> NodeDetails for all referenced ids (one recursive CTE) -> COMMIT."
+  - "Lock rule: every tree write transaction (Apply, Reset, SeedIfEmpty, any future writer) calls DbLocks.AcquireTreeWriteLockAsync(db, ct) as its FIRST statement after BeginTransactionAsync. Key DbLocks.TreeWriteLockKey = 4242, defined only there."
+  - "Invariant: every descendant of a deleted node is deleted (cascade + 409 on add under deleted parent + lock)."
+  - "No more 501: POST /api/nodes/apply is fully implemented; ProblemTypes has BadRequest, NotFound, Conflict, ServiceUnavailable. 404/409 bodies carry a sorted nodeIds extension."
+  - "Compose host ports overridable: DB_PORT (5432), API_PORT (8080), UI_PORT (3000)."
+  - "Apply tests: tests/TreeEditor.Api.Tests/Apply/*.cs per test_matrix in docs/plans/stage-3-backend.yaml; the atomicity test installs and drops its own trigger (Reset does not remove triggers)."
+
+claude_md_decision_line: "Writes serialized: Apply, Reset and startup seed take pg_advisory_xact_lock(4242) (DbLocks.TreeWriteLockKey) as the first statement of their transaction; apply SQL is set-based raw Npgsql on EF's connection — see docs/plans/stage-3-backend.md#decision-record-4--write-serialization-concurrency"
+
+contract_changes_requested: []
+
+organizer_review:   # plan-organizer, stage 3 step 3
+  verified:
+    - Matches api-contract v2 (apply semantics, precedence 400 -> 404 -> 409, limits, error keys, refreshIds ignore-missing, Reset shares the lock).
+    - No schema/migration change; existing check constraint ck_nodes_value_length uses char_length (code points) = validator unit.
+    - Only NodeProblems (NotFound) and HealthEndpoints (ServiceUnavailable) use ProblemTypes besides the stub; removing NotImplemented is safe.
+    - docker-compose.yml change consistent with frontend plan (dev proxy API_URL default http://localhost:8080).
+  closed_gaps:
+    - "zsh: `--include=*.cs` globs are quoted ('--include=*.cs') in every grep; unquoted they fail with 'no matches found'."
+    - Contract v2 now documents the optional nodeIds extension on 404/409 and that idMap order is insert order (informational only).

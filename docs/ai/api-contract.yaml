@@ -1,7 +1,10 @@
 # HTTP contract between backend (backend/) and frontend (frontend/). Owned by plan-organizer.
 # Architects/implementers never edit this file; they report contract_changes_requested.
-version: 1
+version: 2
 stage_introduced: 2
+changelog:
+  - "v1 (stage 2): reads, reset, apply route returning 501."
+  - "v2 (stage 3): apply implemented (501 removed); serialization of apply/reset; refreshIds rule; request limits; validation error keys; error precedence."
 
 base_url:
   api_direct: http://localhost:8080        # api container, published port
@@ -28,6 +31,7 @@ conventions:
     Every non-2xx response body is RFC 7807 ProblemDetails (application/problem+json) with at least
     type, title, status; detail where useful. Validation failures use ValidationProblemDetails
     (extra "errors" map: field -> string[]). Unhandled exceptions -> 500 ProblemDetails (no stack trace).
+    Apply 404/409 bodies add a "nodeIds" extension (int64[], ascending) listing the offending ids.
 
 schemas:
   Node:
@@ -82,7 +86,11 @@ schemas:
         items: { type: integer, format: int64 }
       refreshIds:
         type: array
-        description: Optional. Real ids currently held by the cache; their post-apply state is included in the response.
+        description: >
+          Optional for the server; REQUIRED in practice for the client: the cache sends EVERY real id it holds
+          (not only changed ones). The server never enumerates cascaded subtrees in the response, so this is the
+          only way the client learns that cached descendants of a deleted node are now deleted. Ids that do not
+          exist are silently ignored (no 404) — they are not part of the change set.
         items: { type: integer, format: int64 }
 
   ApplyResponse:
@@ -92,7 +100,7 @@ schemas:
       idMap:
         type: object
         additionalProperties: { type: integer, format: int64 }
-        description: tempId -> newly assigned real id, one entry per adds item.
+        description: tempId -> newly assigned real id, one entry per adds item (key order = insert order, parents first; informational).
       nodes:
         type: array
         items: { $ref: NodeDetails }
@@ -112,6 +120,23 @@ apply_semantics:
     the request -> 409. Exception: deleting an already-deleted node is idempotent (no error).
   not_found: Any referenced real id (edits, deletes, parentId) that does not exist -> 404, rollback.
   empty_request: All arrays empty -> 200 with empty idMap and nodes for refreshIds only.
+  duplicates: >
+    Duplicate ids in deletes are de-duplicated (no error). Duplicate ids in edits -> 400. Duplicate tempIds -> 400.
+    Duplicate refreshIds are de-duplicated.
+  limits: edits, adds and deletes each at most 1000 items; refreshIds at most 10000 items; otherwise 400.
+  temp_id_rules: tempId non-empty, at most 64 chars, unique within adds; otherwise 400.
+  error_precedence: >
+    400 (body/shape/validation, checked before touching the DB) -> 404 (missing real id in edits, deletes,
+    adds.parentId) -> 409 (already-deleted edit target or real add parent). First failure wins; nothing persisted.
+  validation_error_keys: >
+    ValidationProblemDetails.errors keys use the JSON path of the offending field, e.g. "edits[0].value",
+    "adds[2].parentTempId", "adds[1].tempId", "deletes", "body". Messages are free text.
+  concurrency: >
+    Apply and Reset are serialized server-side (one transaction-scoped PostgreSQL advisory lock shared by both).
+    A concurrent add under a node being cascade-deleted therefore either commits first (and is then deleted by
+    the cascade) or runs after (and gets 409). The invariant "every descendant of a deleted node is deleted" always holds.
+  hierarchy_note: >
+    Parent–child relations never change, so ancestorIds of a node are stable for its lifetime (until Reset).
 
 endpoints:
   - id: health
@@ -151,7 +176,8 @@ endpoints:
     path: /api/reset
     description: >
       Restore the DB to the initial seed in one transaction (delete all rows, re-insert seed with its fixed
-      ids, restart the id sequence after the max seed id). Client must also clear its cache.
+      ids, restart the id sequence after the max seed id). Takes the same advisory lock as apply.
+      Client must also clear its cache.
     request: no body
     responses:
       200: { body: "Node[] — the roots after reset" }
@@ -159,11 +185,10 @@ endpoints:
   - id: apply
     method: POST
     path: /api/nodes/apply
-    description: Apply pending cache changes. Stage 2 ships the route only and returns 501; implemented in stage 3.
+    description: Apply pending cache changes in one transaction (see apply_semantics). Implemented in stage 3 (stage 2 returned 501).
     request: { body: ApplyRequest }
     responses:
-      200: { body: ApplyResponse, since_stage: 3 }
-      400: { body: ValidationProblemDetails, when: invalid value, missing/both parent refs, unknown parentTempId, duplicate tempId, cycle, since_stage: 3 }
-      404: { body: ProblemDetails, when: referenced real id missing, since_stage: 3 }
-      409: { body: ProblemDetails, when: target already deleted before the request, since_stage: 3 }
-      501: { body: ProblemDetails, title: "Not Implemented", stage_2_only: true }
+      200: { body: ApplyResponse }
+      400: { body: ValidationProblemDetails, when: "missing/invalid JSON body, invalid value, missing/both parent refs, unknown parentTempId, duplicate tempId or edit id, cycle, limits exceeded" }
+      404: { body: ProblemDetails, when: referenced real id missing (edits, deletes, adds.parentId) }
+      409: { body: ProblemDetails, when: edit target or real add parent already deleted before the request }
