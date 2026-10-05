@@ -26,9 +26,15 @@ Host ports are overridable: `DB_PORT` (default 5432), `API_PORT` (8080), `UI_POR
 
 ## Using the UI
 
-Select a DB node, then **Load into cache**. In the cache select a node and use **Edit / Add child / Delete**; changes are tagged
-new / edited / to delete and stay local until **Apply**, which sends one transactional batch. **Reset** restores the sample data
-and clears the cache.
+The UI follows the "Industry" design (source: `docs/design/stage-5/`): a DB panel and a Cache panel (blueprint style) joined by link lines between a DB row and its cached copy.
+
+- **Load into cache:** the **Load into cache** button, a double-click on a DB row, or drag-and-drop of a DB row onto the cache panel. All three use the same single `GET /api/nodes/{id}`.
+- **Inline editing:** in the cache, double-click / F2 / **Edit** edits the value in place (Enter commits, Escape cancels, blur commits). **Add child** and **Delete** act on the selected node. Tags: new / edited / to delete / deleted. Changes stay local until **Apply**, which opens a dialog listing every change before one transactional `POST /api/nodes/apply`.
+- **Clear cache:** empties the local cache (including unapplied changes and temp ids) with no API call and without touching the database; it asks for confirmation only when changes would be lost.
+- **Reset:** restores the sample data and clears the cache.
+- **Network log:** a collapsible footer listing every API request the UI makes (time, method, path, status, duration).
+- **Styling:** no UI component library. Industry tokens and component classes are ported to `frontend/src/styles/industry.css`, app classes live in `frontend/src/styles/app.css`; fonts are Barlow / Barlow Condensed (Google Fonts); icons are Lucide (`lucide-vue-next`).
+- **Motion / width:** motion honours `prefers-reduced-motion`; the minimum layout width is 1024px.
 
 ### Cache behaviour
 
@@ -46,7 +52,7 @@ Docker is required: tests start a `postgres:16` container via Testcontainers (ra
 
 Integration tests cover reads, Reset, every Apply rule (validation, 404/409, cascade, atomic rollback, concurrency) and the stage-4 cache flows (client-shaped batches, stale cache 409, id mapping across applies).
 
-Frontend tests (Vitest, Node env: hierarchy, pending-change logic, stores with mocked API, PrimeVue pin guard):
+Frontend tests (Vitest, Node env, no DOM: hierarchy and re-parent logic, pending-change logic, stores incl. Clear cache and the single load path, network log, view models for tree rows / link lines / dialogs, highlight and toasts, API client request observer, dependency guard):
 
 ```bash
 cd frontend && source ~/.nvm/nvm.sh && nvm use 22 >/dev/null && npm test
@@ -133,7 +139,7 @@ Defined in `backend/src/TreeEditor.Api/Data/SeedData.cs`; inserted on startup if
 - **Set-based raw SQL for Apply:** fixed number of round trips per batch (recursive CTEs for cascade and ancestors); EF Core for schema/migrations and simple reads.
 - **Serialized writes:** advisory lock 4242 for Apply, Reset and seed.
 - **Client cache:** flat map + pure hierarchy/pending modules (`frontend/src/cache/`), the store only orchestrates; temp ids `tmp-<n>` mapped via `idMap`.
-- **PrimeVue pinned together:** primevue 4.3.3, `@primeuix/themes` 1.0.3 and `@primeuix/styles` 1.0.3 (dependencies and npm override) must change only together; `frontend/src/dependencyPins.test.ts` guards this.
+- **No UI component library:** PrimeVue was removed in stage 5; plain Vue on the ported Industry CSS, Lucide icons pinned exactly; `frontend/src/dependencyPins.test.ts` fails if a PrimeVue package returns or lucide drifts.
 - **Immutable parent:** a node's parent never changes (enforced by trigger), so ancestry is stable and cache hierarchy assembly is safe.
 - **Same-origin `/api` proxy, no CORS:** nginx (container) and the Vite dev server proxy `/api` to the API; no CORS configuration exists.
 - **Reset semantics:** one transaction: `TRUNCATE ... RESTART IDENTITY`, re-insert the seed with fixed ids, set the sequence so the next id is 31. The client also clears its cache.

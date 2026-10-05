@@ -53,6 +53,7 @@ stages:
 
   - id: 5
     name: ui-update
+    status: done
     depends_on: [4]   # restyles the full stage 4 feature set; no new backend behaviour
     goal: Restyle the UI to the "Industry" design from the claude.ai design project, keeping all stage 2–4 behaviour.
     design_reference:
