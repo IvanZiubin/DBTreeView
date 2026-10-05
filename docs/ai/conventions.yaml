@@ -1,6 +1,11 @@
 # Folder ownership, docs and git conventions. Binding for all agents.
 version: 1
 
+environment:
+  node: "via nvm 22; every node/npm command is prefixed with `source ~/.nvm/nvm.sh && nvm use 22 >/dev/null &&`"
+  dotnet_sdk: 8.0.422
+  docker: Docker Desktop required (backend tests use Testcontainers; compose stack)
+
 folder_ownership:
   plan-organizer:
     write: [docs/ai/, docs/plans/ (review fixes only), CLAUDE.md]

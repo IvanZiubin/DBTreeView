@@ -8,7 +8,7 @@ grounding_inputs:
   - CLAUDE.md
   - backend/CLAUDE.md   # from stage 2
   - frontend/CLAUDE.md  # from stage 2
-  - docs/ai/*.yaml
+  - docs/ai/*.yaml   # conventions.yaml `environment:` lists toolchain requirements (node via nvm 22 prefix, .NET 8.0.422, Docker)
 
 steps:
   - id: 1

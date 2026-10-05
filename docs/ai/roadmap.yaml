@@ -14,6 +14,7 @@ stages:
 
   - id: 2
     name: base-structure
+    status: done
     goal: Runnable skeleton — db + api + ui in docker compose with a seeded tree and a lazy-loading DBTreeView.
     definition_of_done:
       - "`docker compose up --build` starts db, api and ui"
