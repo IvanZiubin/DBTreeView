@@ -260,6 +260,37 @@ describe('useCacheStore pending changes', () => {
     expect(cache.hasPendingChanges).toBe(true)
   })
 
+  it('C24b 409 recovery: conflicting nodes become deleted, other changes stay pending', async () => {
+    const cache = useCacheStore()
+    for (const id of [1, 4, 5, 10]) {
+      cache.loadNode(details(id))
+    }
+    cache.editValue(4, 'Comp')
+    cache.addChild(4, 'T')
+    cache.editValue(5, 'Phones')
+
+    // Another client deleted 4 (and so 10): apply returns 409 with nodeIds [4]; the cache is untouched.
+    expect(cache.markDeletedInDb([4, 999])).toEqual(['4'])
+
+    expect(nodeStatus(cache.nodes['4'])).toBe('deleted')
+    expect(cache.nodes['4'].value).toBe('Node 4')
+    expect(cache.nodes['4'].isEdited).toBe(false)
+    expect(nodeStatus(cache.nodes['10'])).toBe('deleted')
+    expect(cache.nodes['tmp-1'].isPendingDelete).toBe(true)
+    expect(cache.nodes['5'].isEdited).toBe(true)
+
+    vi.mocked(applyChanges).mockResolvedValueOnce({ idMap: {}, nodes: [details(5, { value: 'Phones' })] })
+    await cache.apply()
+    expect(applyChanges).toHaveBeenLastCalledWith({
+      edits: [{ id: 5, value: 'Phones' }],
+      adds: [],
+      deletes: [],
+      refreshIds: [1, 4, 5, 10],
+    })
+    expect('tmp-1' in cache.nodes).toBe(false)
+    expect(cache.hasPendingChanges).toBe(false)
+  })
+
   it('C25 apply ignored after Reset (epoch)', async () => {
     const cache = useCacheStore()
     cache.loadNode(details(4))
