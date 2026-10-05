@@ -1,4 +1,4 @@
-// Clear cache (DR-FE-5.6) is client-only: cache.clear() must empty every piece of cache state and issue no request.
+// Clear cache is client-only: cache.clear() must empty every piece of cache state and issue no request.
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { setRequestObserver } from '../api/client'

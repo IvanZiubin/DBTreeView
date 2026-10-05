@@ -1,4 +1,4 @@
-// Pure hierarchy assembly for CachedTreeView (no Vue/Pinia imports). See docs/plans/stage-3-frontend.md DR-FE-3.1.
+// Pure hierarchy assembly for CachedTreeView (no Vue/Pinia imports).
 import { cacheKey, type CacheId, type CachedNode, type CacheTreeNode, type CacheTreeNodeData } from './model'
 
 const TEMP_ID_PATTERN = /^tmp-(\d+)$/
@@ -104,7 +104,7 @@ export function gapTooltip(missingAncestorIds: readonly CacheId[]): string {
 
 /**
  * Keys of cached nodes that move under `loadedId` when it is inserted into the cache (gutter "n re-parented" and the
- * re-parented flash, DR-FE-5.7): nodes whose ancestorIds contain loadedId with no cached ancestor between loadedId and
+ * re-parented flash): nodes whose ancestorIds contain loadedId with no cached ancestor between loadedId and
  * themselves. Empty when loadedId is already cached (a reload never re-parents). Sorted by compareCacheIds.
  */
 export function reparentedKeys(nodes: readonly CachedNode[], loadedId: CacheId): string[] {

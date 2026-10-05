@@ -1,4 +1,4 @@
-// Pure network-log model (no Vue/Pinia imports). Entries are newest first. See docs/plans/stage-5-frontend.md DR-FE-5.5.
+// Pure network-log model (no Vue/Pinia imports). Entries are newest first.
 
 export interface NetworkLogEntry {
   id: number

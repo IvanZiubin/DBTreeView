@@ -45,7 +45,7 @@ export class ApiError extends Error {
 type HttpMethod = 'GET' | 'POST'
 
 /**
- * Receives every request made through request() (network log, DR-FE-5.5). start() runs before fetch and returns an
+ * Receives every request made through request() (network log). start() runs before fetch and returns an
  * entry id; finish() runs exactly once afterwards with the HTTP status (0 = network failure) and the duration in ms
  * measured until the response body was read.
  */
@@ -125,7 +125,7 @@ export function getChildren(id: number): Promise<Node[]> {
   return request<Node[]>('GET', `/nodes/${id}/children`)
 }
 
-/** GET /api/nodes/{id} — single node with ancestorIds. Called only by useTransferStore().loadIntoCache (DR-FE-5.7). */
+/** GET /api/nodes/{id} — single node with ancestorIds. Called only by useTransferStore().loadIntoCache. */
 export function getNode(id: number): Promise<NodeDetails> {
   return request<NodeDetails>('GET', `/nodes/${id}`)
 }

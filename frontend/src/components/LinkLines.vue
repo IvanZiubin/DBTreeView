@@ -6,7 +6,7 @@ import { useHighlightStore } from '../stores/highlight'
 import { useTransferStore } from '../stores/transfer'
 import { computeLinkLines, linkPath, sameLines, type Box, type LinkLine, type RowBox } from '../view/linkLines'
 
-/** Second measure after FLIP (460 ms) and fly-in (720 ms) animations have settled (DR-FE-5.10). */
+/** Second measure after FLIP (460 ms) and fly-in (720 ms) animations have settled. */
 const SETTLE_MS = 760
 /** Side of the square drawn at each line end. */
 const END_SIZE = 5

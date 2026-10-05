@@ -13,7 +13,7 @@ export type FlashScope = 'c' | 'db'
 
 export const FLASH_MS = 1800
 
-/** Cross-panel hover link and transient flash tags (DR-FE-5.10, DR-FE-5.11). */
+/** Cross-panel hover link and transient flash tags. */
 export const useHighlightStore = defineStore('highlight', () => {
   const hover = ref<Hover | null>(null)
   /** '<scope>:<key>' -> transient tag label ('' = highlight only). */

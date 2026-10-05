@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { addEntry, completeEntry, formatClockTime, type NetworkLogEntry } from '../api/networkLog'
 
-/** Every API request issued by the UI (fed by the RequestObserver registered in main.ts, DR-FE-5.5). */
+/** Every API request issued by the UI (fed by the RequestObserver registered in main.ts). */
 export const useNetworkLogStore = defineStore('networkLog', () => {
   /** Newest first, at most MAX_LOG_ENTRIES. Never cleared (Reset / Clear cache keep the history). */
   const entries = ref<NetworkLogEntry[]>([])

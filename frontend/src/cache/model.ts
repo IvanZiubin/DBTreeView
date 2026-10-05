@@ -41,7 +41,7 @@ export interface CacheTreeNodeData {
   missingAncestorIds: CacheId[]
 }
 
-/** One assembled CachedTreeView node (replaces PrimeVue's TreeNode, DR-FE-5.1). */
+/** One assembled CachedTreeView node (replaces PrimeVue's TreeNode). */
 export interface CacheTreeNode {
   /** cacheKey(id). */
   key: string

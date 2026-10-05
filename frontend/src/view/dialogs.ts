@@ -1,4 +1,4 @@
-// Pure texts and itemisation for the Apply and Clear-cache dialogs (no Vue/Pinia imports). DR-FE-5.6, DR-FE-5.9.
+// Pure texts and itemisation for the Apply and Clear-cache dialogs (no Vue/Pinia imports).
 import { cacheKey, type CachedNode } from '../cache/model'
 import type { ApplyPlan } from '../cache/pending'
 

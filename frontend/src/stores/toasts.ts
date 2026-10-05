@@ -21,7 +21,7 @@ export interface Toast {
 export const DEFAULT_TOAST_LIFE_MS = 3200
 export const MAX_TOASTS = 4
 
-/** Blueprint toasts (DR-FE-5.12). */
+/** Blueprint toasts. */
 export const useToastStore = defineStore('toasts', () => {
   /** Oldest first, at most MAX_TOASTS. */
   const toasts = ref<Toast[]>([])

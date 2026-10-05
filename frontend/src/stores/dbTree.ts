@@ -102,7 +102,7 @@ export const useDbTreeStore = defineStore('dbTree', () => {
 
   /**
    * Re-fetches the roots and, level by level, the children of every previously loaded node; restores expansion
-   * and selection for nodes that still exist. Used after a successful Apply (DR-FE-4.8). Only levels the user
+   * and selection for nodes that still exist. Used after a successful Apply. Only levels the user
    * had opened are fetched (stays lazy). A setRoots() meanwhile (Reset, another refresh) aborts it.
    */
   async function refresh(): Promise<void> {

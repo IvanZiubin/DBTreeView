@@ -1,6 +1,6 @@
 /* Tree Editor app classes on top of industry.css (Industry tokens + component classes, ported from
    docs/design/stage-5/industry-styles.css). Colors, fonts and spacing come only from Industry tokens; fixed geometry
-   from the mock is named once in :root below. Hairline row style only. See docs/plans/stage-5-frontend.md DR-FE-5.2. */
+   from the mock is named once in :root below. Hairline row style only. */
 
 :root {
   --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;

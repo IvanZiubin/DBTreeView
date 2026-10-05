@@ -1,5 +1,5 @@
 // DOM-only motion helpers (Web Animations API), no Vue imports. Not unit-tested (Vitest runs in Node); every helper
-// is a no-op when the user prefers reduced motion. See docs/plans/stage-5-frontend.md DR-FE-5.11.
+// is a no-op when the user prefers reduced motion.
 
 export const FLIP_MS = 460
 export const FADE_IN_MS = 320

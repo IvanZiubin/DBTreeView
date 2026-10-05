@@ -1,4 +1,4 @@
-// Pure geometry for the SVG link lines between a DB row and its cached copy (no Vue/Pinia imports). DR-FE-5.10.
+// Pure geometry for the SVG link lines between a DB row and its cached copy (no Vue/Pinia imports).
 
 export interface Box {
   left: number

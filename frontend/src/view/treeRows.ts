@@ -1,4 +1,4 @@
-// Pure row models for the two tree views (no Vue/Pinia imports). See docs/plans/stage-5-frontend.md DR-FE-5.4.
+// Pure row models for the two tree views (no Vue/Pinia imports).
 import { compareCacheIds } from '../cache/hierarchy'
 import type { CacheId, CachedNode, CacheTreeNode } from '../cache/model'
 import { nodeStatus, type NodeStatus } from '../cache/pending'

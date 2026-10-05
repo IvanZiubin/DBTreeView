@@ -26,7 +26,7 @@ export interface Flight {
   seq: number
 }
 
-/** DB -> cache transfer: the single load path, drag state and gutter stats (DR-FE-5.7). */
+/** DB -> cache transfer: the single load path, drag state and gutter stats. */
 export const useTransferStore = defineStore('transfer', () => {
   const pendingLoad = ref<PendingLoad | null>(null)
   const lastLoad = ref<LastLoad | null>(null)

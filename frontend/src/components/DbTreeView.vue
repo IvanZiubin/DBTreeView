@@ -47,7 +47,7 @@ async function toggleRow(row: DbRow): Promise<void> {
   }
 }
 
-/** Button, double-click and drop all use transfer.loadIntoCache, the single GET /api/nodes/{id} path (DR-FE-5.7). */
+/** Button, double-click and drop all use transfer.loadIntoCache, the single GET /api/nodes/{id} path. */
 function onLoadSelected(): void {
   const node = dbTree.selectedNode
   if (node === null) {

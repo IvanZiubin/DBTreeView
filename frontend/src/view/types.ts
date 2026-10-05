@@ -1,4 +1,4 @@
-// Row model types for DBTreeView (no Vue/Pinia imports). Replaces PrimeVue's TreeNode (DR-FE-5.1).
+// Row model types for DBTreeView (no Vue/Pinia imports). Replaces PrimeVue's TreeNode.
 import type { Node } from '../api/types'
 
 /** One DB tree node as kept by src/stores/dbTree.ts; children stay undefined until fetched. */

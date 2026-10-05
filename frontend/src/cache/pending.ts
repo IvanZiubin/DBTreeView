@@ -1,4 +1,4 @@
-// Pure pending-change logic for the cache (no Vue/Pinia imports). See docs/plans/stage-4-frontend.md DR-FE-4.1..4.6.
+// Pure pending-change logic for the cache (no Vue/Pinia imports).
 import type { ApplyAdd, ApplyEdit, ApplyRequest } from '../api/types'
 import { compareCacheIds } from './hierarchy'
 import { cacheKey, type CacheId, type CachedNode } from './model'
@@ -71,7 +71,7 @@ export function nodeStatus(node: CachedNode): NodeStatus {
 }
 
 /**
- * Enforces the deletion invariants on the whole cache, mutating nodes in place (DR-FE-4.2):
+ * Enforces the deletion invariants on the whole cache, mutating nodes in place:
  * 1. a real node with a cached isDeleted ancestor is deleted in the DB too -> isDeleted = true;
  * 2. a node with a cached pending-delete ancestor -> isPendingDelete = true; a temp node with any effectively
  *    deleted cached ancestor -> isPendingDelete = true (it is dropped by apply);
@@ -118,7 +118,7 @@ export interface ApplyPlan {
   droppedTempKeys: string[]
 }
 
-/** Builds the apply request per api-contract client_rules.request_building and refresh_ids (DR-FE-4.5). */
+/** Builds the apply request per api-contract client_rules.request_building and refresh_ids. */
 export function buildApplyPlan(nodes: Readonly<Record<string, CachedNode>>): ApplyPlan {
   const ordered = Object.values(nodes).sort((a, b) => compareCacheIds(a.id, b.id))
   const edits: ApplyEdit[] = []
@@ -203,7 +203,7 @@ export function rekeyKey(key: string, idMap: IdMap): string {
 }
 
 /**
- * Settles the cache after a 200, before response.nodes are merged (DR-FE-4.6). Mutates node objects and returns
+ * Settles the cache after a 200, before response.nodes are merged. Mutates node objects and returns
  * a new record: droppedTempKeys removed; isEdited cleared for editedKeys + discardedEditKeys; isPendingDelete
  * cleared for pendingDeleteKeys; isNew cleared for addedKeys that idMap maps; id, parentId and ancestorIds of
  * every remaining node re-keyed through idMap.
@@ -254,7 +254,7 @@ export function rekeySelection(key: string | null, idMap: IdMap, droppedTempKeys
   return rekeyKey(key, idMap)
 }
 
-/** expandedKeys after a 200: dropped keys removed, temp keys re-keyed; always a new object (DR-FE-3.5). */
+/** expandedKeys after a 200: dropped keys removed, temp keys re-keyed; always a new object. */
 export function rekeyExpanded(
   expanded: Readonly<Record<string, boolean>>,
   idMap: IdMap,

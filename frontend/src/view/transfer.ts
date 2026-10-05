@@ -1,4 +1,4 @@
-// Pure texts for the transfer gutter (no Vue/Pinia imports). DR-FE-5.7.
+// Pure texts for the transfer gutter (no Vue/Pinia imports).
 
 /** Outcome of the last GET /api/nodes/{id} issued by useTransferStore().loadIntoCache. */
 export interface LastLoad {

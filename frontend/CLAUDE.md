@@ -21,7 +21,7 @@ Production image: `Dockerfile` builds with Node and serves via nginx (`nginx.con
 - `src/view/types.ts`, `treeRows.ts`, `linkLines.ts`, `dialogs.ts`, `transfer.ts` - pure view models (row flattening and tags, link-line geometry, Apply / Clear-cache dialog texts, gutter texts); no Vue/Pinia imports.
 - `src/motion/motion.ts` - DOM-only Web Animations helpers (FLIP, fly-in); no-ops with prefers-reduced-motion.
 - `src/components/` - `AppHeader`, `DbTreeView`, `TransferGutter`, `CachedTreeView`, `LinkLines`, `NetworkLog`, `ToastStack`, `ConfirmDialog`, `StatusTags`, `BlueprintCorners`.
-- `src/styles/industry.css`, `src/styles/app.css`; `src/errors.ts`, `src/App.vue`, `src/main.ts`.
+- `src/styles/fonts.css`, `src/styles/industry.css`, `src/styles/app.css`; `src/errors.ts`, `src/App.vue`, `src/main.ts`.
 - Tests: `src/cache/hierarchy.test.ts`, `src/cache/pending.test.ts`, `src/stores/cache.test.ts`, `src/stores/cache.pending.test.ts`, `src/stores/cache.clear.test.ts`, `src/stores/dbTree.test.ts`, `src/dependencyPins.test.ts` `src/api/client.test.ts`, `src/api/networkLog.test.ts`, `src/stores/networkLog.test.ts`, `src/stores/transfer.test.ts`, `src/stores/highlight.test.ts`, `src/stores/toasts.test.ts`, `src/cache/reparent.test.ts`, `src/view/treeRows.test.ts`, `src/view/linkLines.test.ts`, `src/view/dialogs.test.ts`, `src/view/transfer.test.ts`.
 
 ## Styling
@@ -30,7 +30,7 @@ Production image: `Dockerfile` builds with Node and serves via nginx (`nginx.con
 - No UI component library. Global CSS only: `src/styles/industry.css` is a verbatim port of the Industry stylesheet (minus the font import); `src/styles/app.css` holds every app class (BEM-like `block__element`, state classes `is-*`). Components have no `<style>` blocks.
 - Colors, fonts and spacing only from Industry tokens (`--color-*`, `--font-*`, `--space-*`, `--shadow-*`); no hex colors or font names outside `industry.css` (`app.css` defines only `--font-mono` and the layout tokens `--row-height`, `--row-indent`, `--toggle-size`, `--gutter-width`, `--panel-header-height`, `--toast-top`, `--toast-width`).
 - Blueprint objects (panels, dialogs, toasts, cards, primary buttons) are `.blueprint` with `<BlueprintCorners />` as a direct child; square corners, hairline borders, transparent fill.
-- Fonts: Barlow / Barlow Condensed via Google Fonts `<link>` in `index.html`. Icons: `lucide-vue-next` only, always `:stroke-width="1.5"` and an explicit `:size`.
+- Fonts: Barlow / Barlow Condensed self-hosted: woff2 files (latin + latin-ext, only the used weights 400/500/700 and condensed 400/600, OFL) in `src/assets/fonts/`, `@font-face` rules in `src/styles/fonts.css` (imported first in `main.ts`). No external font requests - the UI must work offline. Icons: `lucide-vue-next` only, always `:stroke-width="1.5"` and an explicit `:size`.
 - Hairline rows only (30px, 18px indent, guide lines). Focus: global accent `:focus-visible` ring (rows use an inward offset). Minimum width 1024px.
 - Motion honours prefers-reduced-motion (media query in `app.css`, `prefersReducedMotion()` in `motion.ts`).
 
@@ -46,7 +46,7 @@ Production image: `Dockerfile` builds with Node and serves via nginx (`nginx.con
 - Hierarchy is derived by `buildCacheTree`, never stored: the store keeps a flat map of nodes; each node displays under its nearest cached ancestor, with a `parent #id` gap hint for uncached levels.
 - Pending-change rules live in `src/cache/pending.ts` (pure); the store only orchestrates. `propagateDeletes` must run after every merge and every delete.
 - Apply always sends `refreshIds` = every cached real id (client_rules.refresh_ids); on failure the cache state must stay untouched; on success: settle -> re-key -> `mergeServerNodes`, in that order.
+- Apply 409 (stale cache): `cache.markDeletedInDb(problem.nodeIds)` marks those nodes deleted (propagateDeletes discards their pending work), the rest stays pending; `CachedTreeView.recoverFromConflict` shows a warning and refreshes the DB tree.
 - Temp ids are `tmp-<n>` from `nextTempSeq`; real ids are opaque (only from idMap / server) and may have gaps - never compute ids.
 - Edit / Add child / Delete are disabled and rejected for effectively deleted nodes (`isDeleted || isPendingDelete` or such a cached ancestor) and while applying.
-- No UI component library: PrimeVue was removed in stage 5 (DR-FE-5.1). Do not add primevue / @primeuix/* / primeicons. Icons only from lucide-vue-next 0.525.0 (exact). `src/dependencyPins.test.ts` enforces both.
-- Design decisions: [docs/plans/stage-5-frontend.md](../docs/plans/stage-5-frontend.md), [docs/plans/stage-4-frontend.md](../docs/plans/stage-4-frontend.md), [docs/plans/stage-3-frontend.md](../docs/plans/stage-3-frontend.md), [docs/plans/stage-2-frontend.md](../docs/plans/stage-2-frontend.md).
+- No UI component library: PrimeVue was removed in stage 5. Do not add primevue / @primeuix/* / primeicons. Icons only from lucide-vue-next 0.525.0 (exact). `src/dependencyPins.test.ts` enforces both.
