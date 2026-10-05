@@ -1,0 +1,1471 @@
+# Stage 4 (cache-pending-changes) frontend plan. Human rationale: docs/plans/stage-4-frontend.md
+# Executable literally. Every node/npm command MUST be prefixed with:
+#   source ~/.nvm/nvm.sh && nvm use 22 >/dev/null &&
+# (default `node` on this machine is v14 and is too old).
+version: 1
+stage: 4
+stage_name: cache-pending-changes
+project: frontend
+
+scope:
+  implementer_may_write: [frontend/]
+  never_write: [backend/, docker-compose.yml, docs/, CLAUDE.md, README.md, frontend/CLAUDE.md, frontend/package.json, frontend/package-lock.json, frontend/tsconfig.json, frontend/tsconfig.app.json, frontend/tsconfig.node.json, frontend/vite.config.ts]
+  notes: >
+    Stage 4 only: edit / add child / delete pending in the cache, Apply wiring with temp-id mapping and resync,
+    deletion propagation (incl. nodes loaded under a pending-delete ancestor), status markers, DB tree refresh after
+    Apply, PrimeVue pin guard test. Nothing from docs/design/ (stage 5). No new dependencies. The implementer writes
+    only the S2 smoke test and the complete S3 guard test; the rest of test_matrix is written by docs-and-tests.
+    frontend/CLAUDE.md and README.md are updated by docs-and-tests (see docs_and_tests_updates).
+
+repo_root: /Users/maczone/Desktop/personal/test_qit
+
+prerequisites:
+  runner: chore-runner
+  description: Verification only (no installs). Stop and report on any non-zero exit.
+  scaffold_commands:
+    - id: P1
+      cwd: /Users/maczone/Desktop/personal/test_qit/frontend
+      command: source ~/.nvm/nvm.sh && nvm use 22 >/dev/null && node --version
+      expect: output starts with "v22."
+    - id: P2
+      cwd: /Users/maczone/Desktop/personal/test_qit/frontend
+      command: source ~/.nvm/nvm.sh && nvm use 22 >/dev/null && npm ls vitest vite primevue @primeuix/themes @primeuix/styles pinia --depth=0
+      expect: vitest@3.2.4, vite@6.4.3, primevue@4.3.3, @primeuix/themes@1.0.3, @primeuix/styles@1.0.3, pinia@3.0.2; exit 0
+
+new_dependencies: []   # none; Dialog and InputText ship with the installed primevue 4.3.3
+
+conventions_for_implementer:
+  - Node commands always use the nvm prefix shown at the top of this file.
+  - tsconfig has strict, noUnusedLocals, noUnusedParameters, erasableSyntaxOnly, verbatimModuleSyntax, lib ES2020+DOM. No enums, no parameter properties, `import type` / inline `type` for types, no ES2022+ APIs (no Object.hasOwn, toSorted, at, findLast).
+  - Relative imports only (no `@/` alias).
+  - All HTTP goes through src/api/client.ts. No other file calls fetch.
+  - src/cache/*.ts (except *.test.ts) must not import from 'vue', 'pinia' or any component.
+  - File contents given under `content` are written exactly (whitespace may differ only in the trailing newline).
+  - Do not modify files not listed in steps. Do not touch package.json, package-lock.json, tsconfig*.json, vite.config.ts.
+  - Existing tests (src/cache/hierarchy.test.ts, src/stores/cache.test.ts) must not be edited and must stay green.
+
+steps:
+  - id: S1
+    title: Pure pending-change module
+    files:
+      - { path: frontend/src/cache/pending.ts, action: create }
+    content: |
+      // Pure pending-change logic for the cache (no Vue/Pinia imports). See docs/plans/stage-4-frontend.md DR-FE-4.1..4.6.
+      import type { ApplyAdd, ApplyEdit, ApplyRequest } from '../api/types'
+      import { compareCacheIds } from './hierarchy'
+      import { cacheKey, type CacheId, type CachedNode } from './model'
+
+      /** Contract value_rules: the server trims the value; the trimmed length must be 1..200. */
+      export const MAX_VALUE_LENGTH = 200
+
+      /** tempId -> real id, as returned in ApplyResponse.idMap. */
+      export type IdMap = Readonly<Record<string, number>>
+
+      /** Display status of a cached node, by priority: deleted > pending-delete > new > edited > clean. */
+      export type NodeStatus = 'clean' | 'new' | 'edited' | 'pending-delete' | 'deleted'
+
+      /** Error message for an invalid value (checked after trim), or null when the value is valid. */
+      export function validateValue(value: string): string | null {
+        const trimmed = value.trim()
+        if (trimmed.length === 0) {
+          return 'Value must not be empty.'
+        }
+        if (trimmed.length > MAX_VALUE_LENGTH) {
+          return `Value must be at most ${MAX_VALUE_LENGTH} characters.`
+        }
+        return null
+      }
+
+      /** Deleted in the DB (isDeleted) or marked deleted in the cache (isPendingDelete). */
+      export function isEffectivelyDeleted(node: CachedNode): boolean {
+        return node.isDeleted || node.isPendingDelete
+      }
+
+      /** Cached ancestors of a node in ancestorIds order (root -> parent); uncached levels are skipped. */
+      function cachedAncestors(node: CachedNode, nodes: Readonly<Record<string, CachedNode>>): CachedNode[] {
+        const result: CachedNode[] = []
+        for (const ancestorId of node.ancestorIds) {
+          const ancestor = nodes[cacheKey(ancestorId)]
+          if (ancestor) {
+            result.push(ancestor)
+          }
+        }
+        return result
+      }
+
+      /** True when any cached ancestor is deleted or pending delete. */
+      export function hasEffectivelyDeletedAncestor(
+        node: CachedNode,
+        nodes: Readonly<Record<string, CachedNode>>,
+      ): boolean {
+        return cachedAncestors(node, nodes).some(isEffectivelyDeleted)
+      }
+
+      /** Edit, add child and delete are allowed only for nodes that are not effectively deleted (client_rules). */
+      export function canModify(node: CachedNode, nodes: Readonly<Record<string, CachedNode>>): boolean {
+        return !isEffectivelyDeleted(node) && !hasEffectivelyDeletedAncestor(node, nodes)
+      }
+
+      export function nodeStatus(node: CachedNode): NodeStatus {
+        if (node.isDeleted) {
+          return 'deleted'
+        }
+        if (node.isPendingDelete) {
+          return 'pending-delete'
+        }
+        if (node.isNew) {
+          return 'new'
+        }
+        if (node.isEdited) {
+          return 'edited'
+        }
+        return 'clean'
+      }
+
+      /**
+       * Enforces the deletion invariants on the whole cache, mutating nodes in place (DR-FE-4.2):
+       * 1. a real node with a cached isDeleted ancestor is deleted in the DB too -> isDeleted = true;
+       * 2. a node with a cached pending-delete ancestor -> isPendingDelete = true; a temp node with any effectively
+       *    deleted cached ancestor -> isPendingDelete = true (it is dropped by apply);
+       * 3. a real isDeleted node carries no pending work -> isPendingDelete = false, isEdited = false, value = originalValue.
+       * Every cached ancestor is checked directly, so the result does not depend on iteration order.
+       */
+      export function propagateDeletes(nodes: Record<string, CachedNode>): void {
+        for (const node of Object.values(nodes)) {
+          const ancestors = cachedAncestors(node, nodes)
+          const ancestorDeleted = ancestors.some((ancestor) => ancestor.isDeleted)
+          const ancestorPendingDelete = ancestors.some((ancestor) => ancestor.isPendingDelete)
+          if (node.isNew) {
+            if (ancestorDeleted || ancestorPendingDelete) {
+              node.isPendingDelete = true
+            }
+            continue
+          }
+          if (ancestorDeleted) {
+            node.isDeleted = true
+          }
+          if (node.isDeleted) {
+            node.isPendingDelete = false
+            node.isEdited = false
+            node.value = node.originalValue
+          } else if (ancestorPendingDelete) {
+            node.isPendingDelete = true
+          }
+        }
+      }
+
+      /** Snapshot of one apply: the request plus the cache keys whose flags are settled after a 200. */
+      export interface ApplyPlan {
+        /** Body for POST /api/nodes/apply; refreshIds is always set (every real cached id, ascending). */
+        request: Required<ApplyRequest>
+        /** Real nodes whose edit is sent in request.edits. */
+        editedKeys: string[]
+        /** Real nodes with isEdited that are effectively deleted: edit not sent, isEdited cleared on success. */
+        discardedEditKeys: string[]
+        /** All real nodes with isPendingDelete (request.deletes holds only the top-most of them). */
+        pendingDeleteKeys: string[]
+        /** Temp nodes sent in request.adds. */
+        addedKeys: string[]
+        /** Temp nodes not sent (pending delete / effectively deleted ancestor / dropped parent); removed on success. */
+        droppedTempKeys: string[]
+      }
+
+      /** Builds the apply request per api-contract client_rules.request_building and refresh_ids (DR-FE-4.5). */
+      export function buildApplyPlan(nodes: Readonly<Record<string, CachedNode>>): ApplyPlan {
+        const ordered = Object.values(nodes).sort((a, b) => compareCacheIds(a.id, b.id))
+        const edits: ApplyEdit[] = []
+        const adds: ApplyAdd[] = []
+        const deletes: number[] = []
+        const refreshIds: number[] = []
+        const editedKeys: string[] = []
+        const discardedEditKeys: string[] = []
+        const pendingDeleteKeys: string[] = []
+        const addedKeys: string[] = []
+        const droppedTempKeys: string[] = []
+        const dropped = new Set<string>()
+
+        for (const node of ordered) {
+          const id = node.id
+          const key = cacheKey(id)
+          if (typeof id === 'number') {
+            refreshIds.push(id)
+            if (node.isPendingDelete) {
+              pendingDeleteKeys.push(key)
+              if (!node.isDeleted && !hasEffectivelyDeletedAncestor(node, nodes)) {
+                deletes.push(id)
+              }
+            }
+            if (node.isEdited) {
+              if (isEffectivelyDeleted(node) || hasEffectivelyDeletedAncestor(node, nodes)) {
+                discardedEditKeys.push(key)
+              } else {
+                edits.push({ id, value: node.value })
+                editedKeys.push(key)
+              }
+            }
+            continue
+          }
+          if (!node.isNew) {
+            continue
+          }
+          const parentId = node.parentId
+          const parentMissing =
+            parentId === null || !(cacheKey(parentId) in nodes) || dropped.has(cacheKey(parentId))
+          if (parentId === null || parentMissing || node.isPendingDelete || hasEffectivelyDeletedAncestor(node, nodes)) {
+            dropped.add(key)
+            droppedTempKeys.push(key)
+            continue
+          }
+          if (typeof parentId === 'number') {
+            adds.push({ tempId: id, parentId, value: node.value })
+          } else {
+            adds.push({ tempId: id, parentTempId: parentId, value: node.value })
+          }
+          addedKeys.push(key)
+        }
+
+        return {
+          request: { edits, adds, deletes, refreshIds },
+          editedKeys,
+          discardedEditKeys,
+          pendingDeleteKeys,
+          addedKeys,
+          droppedTempKeys,
+        }
+      }
+
+      /** Success toast text, e.g. "1 edit(s), 2 addition(s), 0 deletion(s) saved." */
+      export function describeApplyPlan(plan: ApplyPlan): string {
+        const { edits, adds, deletes } = plan.request
+        return `${edits.length} edit(s), ${adds.length} addition(s), ${deletes.length} deletion(s) saved.`
+      }
+
+      function hasMapping(idMap: IdMap, key: string): boolean {
+        return Object.prototype.hasOwnProperty.call(idMap, key)
+      }
+
+      /** Temp id -> real id through idMap; any other id is returned unchanged. */
+      export function rekeyId(id: CacheId, idMap: IdMap): CacheId {
+        return typeof id === 'string' && hasMapping(idMap, id) ? idMap[id] : id
+      }
+
+      /** Store key (cacheKey) -> re-keyed store key; keys not in idMap are returned unchanged. */
+      export function rekeyKey(key: string, idMap: IdMap): string {
+        return hasMapping(idMap, key) ? cacheKey(idMap[key]) : key
+      }
+
+      /**
+       * Settles the cache after a 200, before response.nodes are merged (DR-FE-4.6). Mutates node objects and returns
+       * a new record: droppedTempKeys removed; isEdited cleared for editedKeys + discardedEditKeys; isPendingDelete
+       * cleared for pendingDeleteKeys; isNew cleared for addedKeys that idMap maps; id, parentId and ancestorIds of
+       * every remaining node re-keyed through idMap.
+       */
+      export function settleApplied(
+        nodes: Readonly<Record<string, CachedNode>>,
+        plan: ApplyPlan,
+        idMap: IdMap,
+      ): Record<string, CachedNode> {
+        for (const key of plan.editedKeys.concat(plan.discardedEditKeys)) {
+          const node = nodes[key]
+          if (node) {
+            node.isEdited = false
+          }
+        }
+        for (const key of plan.pendingDeleteKeys) {
+          const node = nodes[key]
+          if (node) {
+            node.isPendingDelete = false
+          }
+        }
+        for (const key of plan.addedKeys) {
+          const node = nodes[key]
+          if (node && hasMapping(idMap, key)) {
+            node.isNew = false
+          }
+        }
+        const dropped = new Set(plan.droppedTempKeys)
+        const next: Record<string, CachedNode> = {}
+        for (const key of Object.keys(nodes)) {
+          if (dropped.has(key)) {
+            continue
+          }
+          const node = nodes[key]
+          node.id = rekeyId(node.id, idMap)
+          node.parentId = node.parentId === null ? null : rekeyId(node.parentId, idMap)
+          node.ancestorIds = node.ancestorIds.map((ancestorId) => rekeyId(ancestorId, idMap))
+          next[cacheKey(node.id)] = node
+        }
+        return next
+      }
+
+      /** selectedKey after a 200: null when the selected temp node was dropped, otherwise re-keyed. */
+      export function rekeySelection(key: string | null, idMap: IdMap, droppedTempKeys: readonly string[]): string | null {
+        if (key === null || droppedTempKeys.includes(key)) {
+          return null
+        }
+        return rekeyKey(key, idMap)
+      }
+
+      /** expandedKeys after a 200: dropped keys removed, temp keys re-keyed; always a new object (DR-FE-3.5). */
+      export function rekeyExpanded(
+        expanded: Readonly<Record<string, boolean>>,
+        idMap: IdMap,
+        droppedTempKeys: readonly string[],
+      ): Record<string, boolean> {
+        const dropped = new Set(droppedTempKeys)
+        const next: Record<string, boolean> = {}
+        for (const key of Object.keys(expanded)) {
+          if (expanded[key] && !dropped.has(key)) {
+            next[rekeyKey(key, idMap)] = true
+          }
+        }
+        return next
+      }
+    done_when: File matches content.
+
+  - id: S2
+    title: Pending smoke test (docs-and-tests extends this file)
+    files:
+      - { path: frontend/src/cache/pending.test.ts, action: create }
+    content: |
+      import { describe, expect, it } from 'vitest'
+      import type { CacheId, CachedNode } from './model'
+      import { buildApplyPlan, propagateDeletes } from './pending'
+
+      function node(id: CacheId, ancestorIds: CacheId[], flags: Partial<CachedNode> = {}): CachedNode {
+        const value = `Node ${id}`
+        return {
+          id,
+          parentId: ancestorIds.length > 0 ? ancestorIds[ancestorIds.length - 1] : null,
+          value,
+          originalValue: typeof id === 'number' ? value : '',
+          isDeleted: false,
+          hasChildren: false,
+          isNew: typeof id === 'string',
+          isEdited: false,
+          isPendingDelete: false,
+          ancestorIds,
+          ...flags,
+        }
+      }
+
+      describe('pending (smoke)', () => {
+        it('cascades a pending delete and builds a request with only the top-most delete', () => {
+          const nodes: Record<string, CachedNode> = {
+            '1': node(1, []),
+            '10': node(10, [1, 4], { isPendingDelete: true }),
+            '26': node(26, [1, 4, 10, 18], { isEdited: true, value: 'Local' }),
+            'tmp-1': node('tmp-1', [1, 4, 10]),
+            'tmp-2': node('tmp-2', [1]),
+          }
+
+          propagateDeletes(nodes)
+          expect(nodes['26'].isPendingDelete).toBe(true)
+          expect(nodes['tmp-1'].isPendingDelete).toBe(true)
+          expect(nodes['tmp-2'].isPendingDelete).toBe(false)
+
+          const plan = buildApplyPlan(nodes)
+          expect(plan.request).toEqual({
+            edits: [],
+            adds: [{ tempId: 'tmp-2', parentId: 1, value: 'Node tmp-2' }],
+            deletes: [10],
+            refreshIds: [1, 10, 26],
+          })
+          expect(plan.editedKeys).toEqual([])
+          expect(plan.discardedEditKeys).toEqual(['26'])
+          expect(plan.pendingDeleteKeys).toEqual(['10', '26'])
+          expect(plan.addedKeys).toEqual(['tmp-2'])
+          expect(plan.droppedTempKeys).toEqual(['tmp-1'])
+        })
+      })
+    done_when: File matches content.
+
+  - id: S3
+    title: PrimeVue styling pin guard (open risk 3)
+    files:
+      - { path: frontend/src/dependencyPins.test.ts, action: create }
+    content: |
+      // Guards the stage-3 PrimeVue styling fix (docs/plans/stage-3-frontend.yaml fix_ui_theme; DR-FE-4.9).
+      // `?raw` imports are typed by vite/client (src/vite-env.d.ts) and inlined by Vitest; no JSON-module typing needed.
+      import { describe, expect, it } from 'vitest'
+      import packageJsonText from '../package.json?raw'
+      import installedStylesPackageJsonText from '../node_modules/@primeuix/styles/package.json?raw'
+      import installedButtonStyleText from '../node_modules/@primeuix/styles/button/index.mjs?raw'
+
+      interface PackageJson {
+        version?: string
+        dependencies?: Record<string, string>
+        overrides?: Record<string, string>
+      }
+
+      const PIN_MESSAGE =
+        'primevue 4.3.3 and @primeuix/themes 1.0.3 use the @primeuix/styled 0.5 engine, which only understands the CSS ' +
+        'of @primeuix/styles 1.0.x (newer styles emit dt() calls and the UI renders unstyled). Keep primevue 4.3.3, ' +
+        '@primeuix/themes 1.0.3 and @primeuix/styles 1.0.3 (in dependencies AND overrides) together; change them only ' +
+        'together, in one planned upgrade, and re-check the UI in a browser.'
+
+      const pkg = JSON.parse(packageJsonText) as PackageJson
+      const installedStyles = JSON.parse(installedStylesPackageJsonText) as PackageJson
+
+      describe('PrimeVue styling pin', () => {
+        it('dependencies pin primevue 4.3.3 with @primeuix/themes 1.0.3 and @primeuix/styles 1.0.3', () => {
+          expect(pkg.dependencies?.primevue, PIN_MESSAGE).toBe('4.3.3')
+          expect(pkg.dependencies?.['@primeuix/themes'], PIN_MESSAGE).toBe('1.0.3')
+          expect(pkg.dependencies?.['@primeuix/styles'], PIN_MESSAGE).toBe('1.0.3')
+        })
+
+        it('overrides force the same @primeuix/styles 1.0.3 for primevue', () => {
+          expect(pkg.overrides?.['@primeuix/styles'], PIN_MESSAGE).toBe('1.0.3')
+        })
+
+        it('the installed @primeuix/styles is 1.0.3 and its CSS has no dt() calls', () => {
+          expect(installedStyles.version, PIN_MESSAGE).toBe('1.0.3')
+          expect(installedButtonStyleText.includes("dt('"), PIN_MESSAGE).toBe(false)
+        })
+      })
+    done_when: File matches content.
+
+  - id: S4
+    title: Cache store — edit / add child / delete / apply, deletion propagation on merge
+    files:
+      - { path: frontend/src/stores/cache.ts, action: replace }
+    content: |
+      import { defineStore } from 'pinia'
+      import { computed, ref } from 'vue'
+      import type { TreeNode } from 'primevue/treenode'
+      import { applyChanges } from '../api/client'
+      import type { NodeDetails } from '../api/types'
+      import { buildCacheTree } from '../cache/hierarchy'
+      import { cacheKey, type CacheId, type CachedNode } from '../cache/model'
+      import {
+        buildApplyPlan,
+        canModify,
+        propagateDeletes,
+        rekeyExpanded,
+        rekeySelection,
+        settleApplied,
+        validateValue,
+        type ApplyPlan,
+      } from '../cache/pending'
+
+      // Re-exported so components keep importing cache types from the store module.
+      export { cacheKey }
+      export type { CacheId, CachedNode }
+
+      export const useCacheStore = defineStore('cache', () => {
+        /** All cached nodes keyed by cacheKey(id). Flat: the hierarchy is derived in treeNodes, never stored. */
+        const nodes = ref<Record<string, CachedNode>>({})
+        const selectedKey = ref<string | null>(null)
+        /** PrimeVue Tree expandedKeys. New nodes start expanded; user collapse removes keys. Always replaced, never mutated. */
+        const expandedKeys = ref<Record<string, boolean>>({})
+        /** Next temp id is `tmp-${nextTempSeq}`; only increases; reset by clear(). */
+        const nextTempSeq = ref(1)
+        /** True while POST /api/nodes/apply is in flight; edit/add/delete are rejected meanwhile. */
+        const applying = ref(false)
+        /** Incremented by clear(); callers discard responses that started in an older epoch (Reset race). */
+        const epoch = ref(0)
+
+        const nodeList = computed<CachedNode[]>(() => Object.values(nodes.value))
+
+        const isEmpty = computed<boolean>(() => Object.keys(nodes.value).length === 0)
+
+        const selectedNode = computed<CachedNode | null>(() =>
+          selectedKey.value === null ? null : (nodes.value[selectedKey.value] ?? null),
+        )
+
+        /** Number of nodes carrying any pending flag (new, edited, pending delete). Shown as the Apply badge. */
+        const pendingCount = computed<number>(
+          () => nodeList.value.filter((n) => n.isNew || n.isEdited || n.isPendingDelete).length,
+        )
+
+        const hasPendingChanges = computed<boolean>(() => pendingCount.value > 0)
+
+        /** Edit / Add child / Delete enabled: a selected node that is not effectively deleted, no apply in flight. */
+        const canModifySelected = computed<boolean>(() => {
+          const node = selectedNode.value
+          return node !== null && !applying.value && canModify(node, nodes.value)
+        })
+
+        /** Every real (numeric) id in the cache, ascending. Apply sends this as refreshIds (client_rules.refresh_ids). */
+        const realIds = computed<number[]>(() =>
+          nodeList.value.flatMap((n) => (typeof n.id === 'number' ? [n.id] : [])).sort((a, b) => a - b),
+        )
+
+        /** Hierarchy assembled from cached nodes: nearest cached ancestor (src/cache/hierarchy.ts). */
+        const treeNodes = computed<TreeNode[]>(() => buildCacheTree(nodeList.value))
+
+        function expandKeys(keys: readonly string[]): void {
+          const next: Record<string, boolean> = { ...expandedKeys.value }
+          for (const key of keys) {
+            next[key] = true
+          }
+          expandedKeys.value = next
+        }
+
+        /**
+         * Inserts unknown nodes, refreshes known ones. Refresh overwrites only server fields (parentId, ancestorIds,
+         * originalValue, isDeleted, hasChildren) and value only when not isEdited; isNew/isEdited/isPendingDelete are
+         * never touched here. Newly inserted nodes are added to expandedKeys. Ends with propagateDeletes over the
+         * whole cache (client_rules.pending_delete_propagation, DR-FE-4.2). Used by loadNode and apply.
+         */
+        function mergeServerNodes(serverNodes: readonly NodeDetails[]): void {
+          const inserted: string[] = []
+          for (const details of serverNodes) {
+            const key = cacheKey(details.id)
+            const existing = nodes.value[key]
+            if (existing) {
+              existing.parentId = details.parentId
+              existing.ancestorIds = details.ancestorIds.slice()
+              existing.originalValue = details.value
+              existing.isDeleted = details.isDeleted
+              existing.hasChildren = details.hasChildren
+              if (!existing.isEdited) {
+                existing.value = details.value
+              }
+            } else {
+              nodes.value[key] = {
+                id: details.id,
+                parentId: details.parentId,
+                value: details.value,
+                originalValue: details.value,
+                isDeleted: details.isDeleted,
+                hasChildren: details.hasChildren,
+                isNew: false,
+                isEdited: false,
+                isPendingDelete: false,
+                ancestorIds: details.ancestorIds.slice(),
+              }
+              inserted.push(key)
+            }
+          }
+          propagateDeletes(nodes.value)
+          if (inserted.length > 0) {
+            expandKeys(inserted)
+          }
+        }
+
+        /** Loads one node from GET /api/nodes/{id}: merge, expand its cached ancestors (reveal), select it. */
+        function loadNode(details: NodeDetails): void {
+          mergeServerNodes([details])
+          const cachedAncestorKeys = details.ancestorIds
+            .map((ancestorId) => cacheKey(ancestorId))
+            .filter((key) => key in nodes.value)
+          if (cachedAncestorKeys.length > 0) {
+            expandKeys(cachedAncestorKeys)
+          }
+          selectedKey.value = cacheKey(details.id)
+        }
+
+        /**
+         * Sets the trimmed value (DR-FE-4.4). Real node: isEdited = value differs from originalValue. Temp node: value
+         * only. Returns false (no change) for unknown / effectively deleted nodes, invalid values, or during apply.
+         */
+        function editValue(id: CacheId, value: string): boolean {
+          const node = nodes.value[cacheKey(id)]
+          if (!node || applying.value || !canModify(node, nodes.value) || validateValue(value) !== null) {
+            return false
+          }
+          const trimmed = value.trim()
+          node.value = trimmed
+          if (!node.isNew) {
+            node.isEdited = trimmed !== node.originalValue
+          }
+          return true
+        }
+
+        /**
+         * Adds a temp child `tmp-<n>` under a cached node (DR-FE-4.3); expands parent and child; selects the child.
+         * Returns the new key, or null (no change) for unknown / effectively deleted parents, invalid values, or during apply.
+         */
+        function addChild(parentId: CacheId, value: string): string | null {
+          const parent = nodes.value[cacheKey(parentId)]
+          if (!parent || applying.value || !canModify(parent, nodes.value) || validateValue(value) !== null) {
+            return null
+          }
+          let tempId = `tmp-${nextTempSeq.value}`
+          while (tempId in nodes.value) {
+            nextTempSeq.value += 1
+            tempId = `tmp-${nextTempSeq.value}`
+          }
+          nextTempSeq.value += 1
+          nodes.value[tempId] = {
+            id: tempId,
+            parentId: parent.id,
+            value: value.trim(),
+            originalValue: '',
+            isDeleted: false,
+            hasChildren: false,
+            isNew: true,
+            isEdited: false,
+            isPendingDelete: false,
+            ancestorIds: [...parent.ancestorIds, parent.id],
+          }
+          expandKeys([cacheKey(parent.id), tempId])
+          selectedKey.value = tempId
+          return tempId
+        }
+
+        /**
+         * Marks the node pending delete and cascades to every cached descendant, incl. temp nodes (propagateDeletes).
+         * Returns false (no change) for unknown / effectively deleted nodes or during apply.
+         */
+        function deleteNode(id: CacheId): boolean {
+          const node = nodes.value[cacheKey(id)]
+          if (!node || applying.value || !canModify(node, nodes.value)) {
+            return false
+          }
+          node.isPendingDelete = true
+          propagateDeletes(nodes.value)
+          return true
+        }
+
+        /**
+         * Sends all pending changes in one POST /api/nodes/apply (DR-FE-4.6). Returns the applied plan on success, or
+         * null when nothing was done (no pending changes, already applying, or a Reset happened meanwhile).
+         * Throws the ApiError on failure; the cache is then left exactly as it was (client_rules.failure_handling).
+         */
+        async function apply(): Promise<ApplyPlan | null> {
+          if (applying.value || !hasPendingChanges.value) {
+            return null
+          }
+          const plan = buildApplyPlan(nodes.value)
+          const startedEpoch = epoch.value
+          applying.value = true
+          try {
+            const response = await applyChanges(plan.request)
+            if (startedEpoch !== epoch.value) {
+              return null
+            }
+            nodes.value = settleApplied(nodes.value, plan, response.idMap)
+            selectedKey.value = rekeySelection(selectedKey.value, response.idMap, plan.droppedTempKeys)
+            expandedKeys.value = rekeyExpanded(expandedKeys.value, response.idMap, plan.droppedTempKeys)
+            mergeServerNodes(response.nodes)
+            return plan
+          } finally {
+            if (startedEpoch === epoch.value) {
+              applying.value = false
+            }
+          }
+        }
+
+        /** Empties the cache incl. pending changes (used by Reset) and starts a new epoch. */
+        function clear(): void {
+          nodes.value = {}
+          selectedKey.value = null
+          expandedKeys.value = {}
+          nextTempSeq.value = 1
+          applying.value = false
+          epoch.value += 1
+        }
+
+        return {
+          nodes,
+          selectedKey,
+          expandedKeys,
+          nextTempSeq,
+          applying,
+          epoch,
+          nodeList,
+          isEmpty,
+          selectedNode,
+          pendingCount,
+          hasPendingChanges,
+          canModifySelected,
+          realIds,
+          treeNodes,
+          mergeServerNodes,
+          loadNode,
+          editValue,
+          addChild,
+          deleteNode,
+          apply,
+          clear,
+        }
+      })
+    done_when: File matches content.
+
+  - id: S5
+    title: DB tree store — refresh() after Apply
+    files:
+      - { path: frontend/src/stores/dbTree.ts, action: replace }
+    content: |
+      import { defineStore } from 'pinia'
+      import { computed, ref } from 'vue'
+      import type { TreeNode } from 'primevue/treenode'
+      import { getChildren, getRoots } from '../api/client'
+      import type { Node } from '../api/types'
+
+      /** Maps an API node to a PrimeVue TreeNode. Children are loaded lazily. */
+      export function toTreeNode(node: Node): TreeNode {
+        return {
+          key: String(node.id),
+          label: node.value,
+          leaf: !node.hasChildren,
+          loading: false,
+          data: node,
+        }
+      }
+
+      function findTreeNode(nodes: TreeNode[], key: string): TreeNode | null {
+        for (const node of nodes) {
+          if (node.key === key) {
+            return node
+          }
+          if (node.children) {
+            const found = findTreeNode(node.children, key)
+            if (found) {
+              return found
+            }
+          }
+        }
+        return null
+      }
+
+      export const useDbTreeStore = defineStore('dbTree', () => {
+        const roots = ref<TreeNode[]>([])
+        const rootsLoading = ref(false)
+        const expandedKeys = ref<Record<string, boolean>>({})
+        const selectionKeys = ref<Record<string, boolean>>({})
+        /** Keys whose children have been fetched; re-expanding never refetches. */
+        const loadedKeys = ref<Record<string, boolean>>({})
+        /** Incremented by setRoots(); late children responses from an older tree are discarded. */
+        let generation = 0
+
+        const selectedId = computed<number | null>(() => {
+          const key = Object.keys(selectionKeys.value).find((k) => selectionKeys.value[k])
+          return key === undefined ? null : Number(key)
+        })
+
+        const selectedNode = computed<Node | null>(() => {
+          if (selectedId.value === null) {
+            return null
+          }
+          const treeNode = findTreeNode(roots.value, String(selectedId.value))
+          return treeNode ? (treeNode.data as Node) : null
+        })
+
+        /** Replaces the whole tree with fresh roots and clears expansion/selection state. */
+        function setRoots(nodes: Node[]): void {
+          generation += 1
+          roots.value = nodes.map(toTreeNode)
+          expandedKeys.value = {}
+          selectionKeys.value = {}
+          loadedKeys.value = {}
+        }
+
+        async function loadRoots(): Promise<void> {
+          rootsLoading.value = true
+          try {
+            setRoots(await getRoots())
+          } finally {
+            rootsLoading.value = false
+          }
+        }
+
+        /** Loads one level of children for the node with the given key (called on node-expand). */
+        async function loadChildren(key: string): Promise<void> {
+          if (loadedKeys.value[key]) {
+            return
+          }
+          const target = findTreeNode(roots.value, key)
+          if (!target || target.leaf || target.loading) {
+            return
+          }
+          const startedGeneration = generation
+          target.loading = true
+          try {
+            const children = await getChildren(Number(key))
+            if (startedGeneration !== generation) {
+              return
+            }
+            target.children = children.map(toTreeNode)
+            target.leaf = children.length === 0
+            loadedKeys.value[key] = true
+          } catch (err) {
+            if (startedGeneration === generation) {
+              delete expandedKeys.value[key]
+            }
+            throw err
+          } finally {
+            target.loading = false
+          }
+        }
+
+        /**
+         * Re-fetches the roots and, level by level, the children of every previously loaded node; restores expansion
+         * and selection for nodes that still exist. Used after a successful Apply (DR-FE-4.8). Only levels the user
+         * had opened are fetched (stays lazy). A setRoots() meanwhile (Reset, another refresh) aborts it.
+         */
+        async function refresh(): Promise<void> {
+          const wasLoaded = Object.keys(loadedKeys.value).filter((key) => loadedKeys.value[key])
+          const wasExpanded = Object.keys(expandedKeys.value).filter((key) => expandedKeys.value[key])
+          const wasSelected = Object.keys(selectionKeys.value).filter((key) => selectionKeys.value[key])
+          const startedGeneration = generation
+          rootsLoading.value = true
+          let freshRoots: Node[] = []
+          try {
+            freshRoots = await getRoots()
+          } finally {
+            rootsLoading.value = false
+          }
+          if (startedGeneration !== generation) {
+            return
+          }
+          setRoots(freshRoots)
+          const refreshGeneration = generation
+
+          let pending = wasLoaded
+          while (pending.length > 0) {
+            const ready = pending.filter((key) => {
+              const target = findTreeNode(roots.value, key)
+              return target !== null && !target.leaf
+            })
+            if (ready.length === 0) {
+              break
+            }
+            const results = await Promise.all(ready.map((key) => getChildren(Number(key))))
+            if (refreshGeneration !== generation) {
+              return
+            }
+            ready.forEach((key, index) => {
+              const target = findTreeNode(roots.value, key)
+              if (target) {
+                target.children = results[index].map(toTreeNode)
+                target.leaf = results[index].length === 0
+                loadedKeys.value[key] = true
+              }
+            })
+            pending = pending.filter((key) => !ready.includes(key))
+          }
+
+          const nextExpanded: Record<string, boolean> = {}
+          for (const key of wasExpanded) {
+            if (loadedKeys.value[key]) {
+              nextExpanded[key] = true
+            }
+          }
+          expandedKeys.value = nextExpanded
+
+          const nextSelection: Record<string, boolean> = {}
+          for (const key of wasSelected) {
+            if (findTreeNode(roots.value, key) !== null) {
+              nextSelection[key] = true
+            }
+          }
+          selectionKeys.value = nextSelection
+        }
+
+        return {
+          roots,
+          rootsLoading,
+          expandedKeys,
+          selectionKeys,
+          selectedId,
+          selectedNode,
+          setRoots,
+          loadRoots,
+          loadChildren,
+          refresh,
+        }
+      })
+    done_when: File matches content.
+
+  - id: S6
+    title: NodeLabel — status prop with new / edited / to delete / deleted tags
+    files:
+      - { path: frontend/src/components/NodeLabel.vue, action: replace }
+    content: |
+      <script setup lang="ts">
+      import { computed } from 'vue'
+      import Tag from 'primevue/tag'
+      import type { NodeStatus } from '../cache/pending'
+
+      type TagSeverity = 'secondary' | 'danger' | 'success' | 'warn'
+
+      const TAGS: Record<NodeStatus, { label: string; severity: TagSeverity } | null> = {
+        clean: null,
+        new: { label: 'new', severity: 'success' },
+        edited: { label: 'edited', severity: 'warn' },
+        'pending-delete': { label: 'to delete', severity: 'danger' },
+        deleted: { label: 'deleted', severity: 'secondary' },
+      }
+
+      const props = defineProps<{
+        value: string
+        status: NodeStatus
+      }>()
+
+      const tag = computed(() => TAGS[props.status])
+      </script>
+
+      <template>
+        <span class="node-label" :class="`node-label--${status}`" :data-status="status" data-testid="node-label">
+          <span class="node-label__value">{{ value }}</span>
+          <Tag v-if="tag" :value="tag.label" :severity="tag.severity" class="node-label__tag" />
+        </span>
+      </template>
+
+      <style scoped>
+      .node-label {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
+      .node-label--deleted .node-label__value {
+        text-decoration: line-through;
+        opacity: 0.55;
+      }
+
+      .node-label--pending-delete .node-label__value {
+        text-decoration: line-through;
+        opacity: 0.75;
+      }
+
+      .node-label--new .node-label__value {
+        font-style: italic;
+      }
+
+      .node-label__tag {
+        font-size: 0.7rem;
+        padding: 0.1rem 0.4rem;
+      }
+      </style>
+    done_when: File matches content.
+
+  - id: S7
+    title: NodeValueDialog — one dialog for Edit value and Add child
+    files:
+      - { path: frontend/src/components/NodeValueDialog.vue, action: create }
+    content: |
+      <script setup lang="ts">
+      import { computed, ref, watch } from 'vue'
+      import Button from 'primevue/button'
+      import Dialog from 'primevue/dialog'
+      import InputText from 'primevue/inputtext'
+      import { MAX_VALUE_LENGTH, validateValue } from '../cache/pending'
+
+      const props = defineProps<{
+        visible: boolean
+        header: string
+        confirmLabel: string
+        initialValue: string
+      }>()
+
+      const emit = defineEmits<{
+        'update:visible': [visible: boolean]
+        confirm: [value: string]
+      }>()
+
+      const draft = ref('')
+      const submitted = ref(false)
+
+      watch(
+        () => props.visible,
+        (visible) => {
+          if (visible) {
+            draft.value = props.initialValue
+            submitted.value = false
+          }
+        },
+        { immediate: true },
+      )
+
+      const error = computed<string | null>(() => validateValue(draft.value))
+      const showError = computed<boolean>(() => submitted.value && error.value !== null)
+
+      function onInput(value: string | undefined): void {
+        draft.value = value ?? ''
+      }
+
+      function close(): void {
+        emit('update:visible', false)
+      }
+
+      /** Validates (contract value_rules), emits the trimmed value, closes. Enter in the input calls this too. */
+      function submit(): void {
+        submitted.value = true
+        if (error.value !== null) {
+          return
+        }
+        emit('confirm', draft.value.trim())
+        close()
+      }
+      </script>
+
+      <template>
+        <Dialog
+          :visible="visible"
+          modal
+          :header="header"
+          :draggable="false"
+          :style="{ width: '28rem' }"
+          @update:visible="emit('update:visible', $event)"
+        >
+          <div class="value-dialog" data-testid="node-value-dialog">
+            <label for="node-value-input" class="value-dialog__label">Value</label>
+            <InputText
+              id="node-value-input"
+              :model-value="draft"
+              :invalid="showError"
+              autofocus
+              fluid
+              data-testid="node-value-input"
+              @update:model-value="onInput"
+              @keydown.enter.prevent="submit"
+            />
+            <small v-if="showError" class="value-dialog__error" data-testid="node-value-error">{{ error }}</small>
+            <small v-else class="value-dialog__hint">
+              1–{{ MAX_VALUE_LENGTH }} characters; leading and trailing spaces are removed.
+            </small>
+          </div>
+          <template #footer>
+            <Button label="Cancel" severity="secondary" outlined data-testid="node-value-cancel" @click="close" />
+            <Button :label="confirmLabel" data-testid="node-value-confirm" @click="submit" />
+          </template>
+        </Dialog>
+      </template>
+
+      <style scoped>
+      .value-dialog {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+      }
+
+      .value-dialog__label {
+        font-weight: 600;
+      }
+
+      .value-dialog__error {
+        color: var(--p-red-500);
+      }
+
+      .value-dialog__hint {
+        color: var(--p-text-muted-color);
+      }
+      </style>
+    done_when: File matches content.
+
+  - id: S8
+    title: CachedTreeView — toolbar wired, dialog, status markers, Apply
+    files:
+      - { path: frontend/src/components/CachedTreeView.vue, action: replace }
+    content: |
+      <script setup lang="ts">
+      import { computed, ref } from 'vue'
+      import Button from 'primevue/button'
+      import Tree from 'primevue/tree'
+      import type { TreeNode } from 'primevue/treenode'
+      import { useToast } from 'primevue/usetoast'
+      import NodeLabel from './NodeLabel.vue'
+      import NodeValueDialog from './NodeValueDialog.vue'
+      import { gapTooltip } from '../cache/hierarchy'
+      import type { CacheId, CacheTreeNodeData } from '../cache/model'
+      import { describeApplyPlan, nodeStatus } from '../cache/pending'
+      import { reportError } from '../errors'
+      import { useCacheStore } from '../stores/cache'
+      import { useDbTreeStore } from '../stores/dbTree'
+
+      const cache = useCacheStore()
+      const dbTree = useDbTreeStore()
+      const toast = useToast()
+
+      /** Bridges PrimeVue single-selection keys to cache.selectedKey. */
+      const selectionKeys = computed<Record<string, boolean>>({
+        get: () => (cache.selectedKey === null ? {} : { [cache.selectedKey]: true }),
+        set: (keys) => {
+          const key = Object.keys(keys).find((k) => keys[k])
+          cache.selectedKey = key ?? null
+        },
+      })
+
+      type DialogMode = 'edit' | 'add'
+
+      /** Open dialog mode (null = closed) and the node it targets, captured when the dialog opens. */
+      const dialogMode = ref<DialogMode | null>(null)
+      const dialogTargetId = ref<CacheId | null>(null)
+      const dialogInitialValue = ref('')
+
+      const dialogVisible = computed<boolean>({
+        get: () => dialogMode.value !== null,
+        set: (visible) => {
+          if (!visible) {
+            dialogMode.value = null
+            dialogTargetId.value = null
+          }
+        },
+      })
+
+      const dialogHeader = computed<string>(() => (dialogMode.value === 'add' ? 'Add child' : 'Edit value'))
+      const dialogConfirmLabel = computed<string>(() => (dialogMode.value === 'add' ? 'Add' : 'Save'))
+
+      const applyBadge = computed<string | undefined>(() =>
+        cache.pendingCount > 0 ? String(cache.pendingCount) : undefined,
+      )
+
+      function rowData(node: TreeNode): CacheTreeNodeData {
+        return node.data as CacheTreeNodeData
+      }
+
+      function openEdit(): void {
+        const node = cache.selectedNode
+        if (node === null || !cache.canModifySelected) {
+          return
+        }
+        dialogTargetId.value = node.id
+        dialogInitialValue.value = node.value
+        dialogMode.value = 'edit'
+      }
+
+      function openAddChild(): void {
+        const node = cache.selectedNode
+        if (node === null || !cache.canModifySelected) {
+          return
+        }
+        dialogTargetId.value = node.id
+        dialogInitialValue.value = ''
+        dialogMode.value = 'add'
+      }
+
+      function onDialogConfirm(value: string): void {
+        const id = dialogTargetId.value
+        const mode = dialogMode.value
+        if (id === null || mode === null) {
+          return
+        }
+        const done = mode === 'edit' ? cache.editValue(id, value) : cache.addChild(id, value) !== null
+        if (!done) {
+          reportError(new Error('The node can no longer be modified (it is deleted or an apply is running).'))
+        }
+      }
+
+      function onDelete(): void {
+        const node = cache.selectedNode
+        if (node === null) {
+          return
+        }
+        if (!cache.deleteNode(node.id)) {
+          reportError(new Error('The node can no longer be deleted (it is deleted or an apply is running).'))
+        }
+      }
+
+      /** POST /api/nodes/apply via the store; on success: toast + DB tree refresh. Failures keep all pending changes. */
+      async function onApply(): Promise<void> {
+        try {
+          const plan = await cache.apply()
+          if (plan === null) {
+            return
+          }
+          toast.add({ severity: 'success', summary: 'Changes applied', detail: describeApplyPlan(plan), life: 3000 })
+        } catch (err) {
+          reportError(err)
+          return
+        }
+        try {
+          await dbTree.refresh()
+        } catch (err) {
+          reportError(err)
+        }
+      }
+      </script>
+
+      <template>
+        <section class="tree-panel" data-testid="cached-tree-view">
+          <header class="tree-panel__header">
+            <h2 class="tree-panel__title">Cache</h2>
+            <div class="tree-panel__toolbar">
+              <Button
+                label="Edit"
+                icon="pi pi-pencil"
+                size="small"
+                severity="secondary"
+                :disabled="!cache.canModifySelected"
+                data-testid="cache-edit"
+                @click="openEdit"
+              />
+              <Button
+                label="Add child"
+                icon="pi pi-plus"
+                size="small"
+                severity="secondary"
+                :disabled="!cache.canModifySelected"
+                data-testid="cache-add-child"
+                @click="openAddChild"
+              />
+              <Button
+                label="Delete"
+                icon="pi pi-trash"
+                size="small"
+                severity="danger"
+                :disabled="!cache.canModifySelected"
+                data-testid="cache-delete"
+                @click="onDelete"
+              />
+              <Button
+                label="Apply"
+                icon="pi pi-check"
+                size="small"
+                severity="success"
+                :badge="applyBadge"
+                badge-severity="contrast"
+                :disabled="!cache.hasPendingChanges || cache.applying"
+                :loading="cache.applying"
+                data-testid="cache-apply"
+                @click="onApply"
+              />
+            </div>
+          </header>
+          <div class="tree-panel__body">
+            <p v-if="cache.isEmpty" class="tree-panel__empty" data-testid="cache-empty">
+              The cache is empty. Select a node in the database tree and click “Load into cache”.
+            </p>
+            <Tree
+              v-else
+              v-model:selection-keys="selectionKeys"
+              v-model:expanded-keys="cache.expandedKeys"
+              :value="cache.treeNodes"
+              selection-mode="single"
+              :meta-key-selection="false"
+              class="tree-panel__tree"
+              data-testid="cache-tree"
+            >
+              <template #default="{ node }">
+                <span
+                  class="cache-row"
+                  :data-testid="`cache-node-${node.key}`"
+                  :data-status="nodeStatus(rowData(node).node)"
+                >
+                  <span
+                    v-if="rowData(node).missingAncestorIds.length > 0"
+                    class="cache-row__gap"
+                    :title="gapTooltip(rowData(node).missingAncestorIds)"
+                    :aria-label="gapTooltip(rowData(node).missingAncestorIds)"
+                    :data-gap-depth="rowData(node).missingAncestorIds.length"
+                    data-testid="cache-gap-marker"
+                  >…</span>
+                  <NodeLabel :value="rowData(node).node.value" :status="nodeStatus(rowData(node).node)" />
+                </span>
+              </template>
+            </Tree>
+          </div>
+          <NodeValueDialog
+            v-model:visible="dialogVisible"
+            :header="dialogHeader"
+            :confirm-label="dialogConfirmLabel"
+            :initial-value="dialogInitialValue"
+            @confirm="onDialogConfirm"
+          />
+        </section>
+      </template>
+
+      <style scoped>
+      .cache-row {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.375rem;
+      }
+
+      .cache-row__gap {
+        padding: 0 0.3rem;
+        border: 1px dashed var(--p-content-border-color);
+        border-radius: 4px;
+        color: var(--p-text-muted-color);
+        font-size: 0.8rem;
+        line-height: 1.3;
+        cursor: help;
+      }
+      </style>
+    done_when: File matches content.
+
+  - id: S9
+    title: DbTreeView — NodeLabel status prop
+    files:
+      - { path: frontend/src/components/DbTreeView.vue, action: modify }
+    instructions: >
+      Replace exactly the line
+      `<NodeLabel :value="nodeData(node).value" :deleted="nodeData(node).isDeleted" />`
+      with
+      `<NodeLabel :value="nodeData(node).value" :status="nodeData(node).isDeleted ? 'deleted' : 'clean'" />`
+      (keep the existing indentation). Change nothing else in the file.
+    done_when: "grep -n ':deleted=' frontend/src/components/DbTreeView.vue returns no match; the new line is present."
+
+  - id: S10
+    title: Type-check and build
+    files: []
+    command: cd /Users/maczone/Desktop/personal/test_qit/frontend && source ~/.nvm/nvm.sh && nvm use 22 >/dev/null && npm run build
+    instructions: >
+      Run the command. If vue-tsc reports errors, fix them only inside files created/modified by S1-S9 while keeping
+      the specified names, signatures and behaviour. If a fix would change a specified exported signature or type,
+      a store's returned members, a component's props/emits, or require tsconfig/package.json changes, stop and report
+      the exact error to the organizer instead.
+    done_when: Exit code 0; frontend/dist/index.html exists; no file under dist/ contains "vitest".
+
+  - id: S11
+    title: Grep checks
+    files: []
+    command: 'grep -rnE "TODO stage 4|Intentionally empty until stage 4|:deleted=" /Users/maczone/Desktop/personal/test_qit/frontend/src'
+    done_when: No matches (grep exit 1).
+
+  - id: S12
+    title: Run unit tests
+    files: []
+    command: cd /Users/maczone/Desktop/personal/test_qit/frontend && source ~/.nvm/nvm.sh && nvm use 22 >/dev/null && npm test
+    instructions: >
+      All existing tests (hierarchy.test.ts, cache.test.ts) plus S2 and S3 must pass. If src/dependencyPins.test.ts
+      fails to import a `?raw` module (resolution or transform error, not an assertion failure), stop and report the
+      exact error; do not switch to JSON imports or change tsconfig/vite config. If an assertion in it fails, stop and
+      report (it means the PrimeVue pin drifted).
+    done_when: Exit code 0; 4 test files; 0 failed.
+
+  - id: S13
+    title: Docker image builds
+    files: []
+    command: docker build -t tree-editor-ui:stage4 /Users/maczone/Desktop/personal/test_qit/frontend
+    done_when: Exit code 0.
+
+acceptance_criteria:
+  automated:
+    - id: AC1
+      check: Type check (incl. test files) + production build
+      command: cd /Users/maczone/Desktop/personal/test_qit/frontend && source ~/.nvm/nvm.sh && nvm use 22 >/dev/null && npm run build
+      expect: exit 0
+    - id: AC2
+      check: Unit tests pass (incl. PrimeVue pin guard)
+      command: cd /Users/maczone/Desktop/personal/test_qit/frontend && source ~/.nvm/nvm.sh && nvm use 22 >/dev/null && npm test
+      expect: exit 0; 0 failed (after docs-and-tests, all test_matrix cases pass)
+    - id: AC3
+      check: Dependencies and configs unchanged
+      command: cd /Users/maczone/Desktop/personal/test_qit/frontend && source ~/.nvm/nvm.sh && nvm use 22 >/dev/null && npm ls vitest vite primevue @primeuix/themes @primeuix/styles pinia --depth=0 && git -C /Users/maczone/Desktop/personal/test_qit diff --quiet -- frontend/package.json frontend/package-lock.json frontend/tsconfig.json frontend/tsconfig.app.json frontend/tsconfig.node.json frontend/vite.config.ts
+      expect: vitest@3.2.4, vite@6.4.3, primevue@4.3.3, @primeuix/themes@1.0.3, @primeuix/styles@1.0.3, pinia@3.0.2; exit 0 (no diff in those files)
+    - id: AC4
+      check: Stubs and stage-4 TODOs gone
+      command: grep -rnE "TODO stage 4|Intentionally empty until stage 4" /Users/maczone/Desktop/personal/test_qit/frontend/src
+      expect: no matches (grep exit 1)
+    - id: AC5
+      check: fetch used only in the API client
+      command: grep -rln "fetch(" /Users/maczone/Desktop/personal/test_qit/frontend/src
+      expect: exactly one line, ending in src/api/client.ts
+    - id: AC6
+      check: Cache modules are pure (no Vue/Pinia imports)
+      command: grep -nE "from '(vue|pinia)'" /Users/maczone/Desktop/personal/test_qit/frontend/src/cache/hierarchy.ts /Users/maczone/Desktop/personal/test_qit/frontend/src/cache/model.ts /Users/maczone/Desktop/personal/test_qit/frontend/src/cache/pending.ts
+      expect: no matches (grep exit 1)
+    - id: AC7
+      check: Apply always sends refreshIds from the plan builder
+      command: grep -n "refreshIds" /Users/maczone/Desktop/personal/test_qit/frontend/src/cache/pending.ts
+      expect: 'at least one line containing "request: { edits, adds, deletes, refreshIds }"'
+    - id: AC8
+      check: UI image builds
+      command: docker build -t tree-editor-ui:stage4 /Users/maczone/Desktop/personal/test_qit/frontend
+      expect: exit 0
+    - id: AC9
+      check: Stack up, SPA served
+      command: cd /Users/maczone/Desktop/personal/test_qit && docker compose up --build -d && sleep 15 && curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/
+      expect: '"200"'
+  manual_ui_checks:
+    preconditions: >
+      Stack running (AC9), browser at http://localhost:3000, DevTools Network open. Click Reset (confirm) before M1 so
+      the DB is the seed (ids 1..30; chain 1 Electronics > 4 Computers > 10 Laptops > 18 Ultrabooks > 26 Ultrabook
+      13-inch / 27 Ultrabook 15-inch; 5 Phones under 1; roots 1, 2 Books, 3 Home and Garden). New real ids are > 30 and
+      may have gaps (a failed apply consumes ids) — never assume specific values.
+    checks:
+      - id: M1
+        check: 'Actions disabled by default: with an empty cache and with no cache selection, Edit, Add child, Delete and Apply are disabled.'
+      - id: M2
+        check: 'Edit pending: load 4 (Computers). Click Edit -> dialog "Edit value" prefilled "Computers". Clear the input and press Enter -> inline error "Value must not be empty.", dialog stays. Type "  Computers & Tablets  ", press Enter -> dialog closes; row shows "Computers & Tablets" with a yellow "edited" tag; Apply enabled with badge "1". Network shows no request since the GET /api/nodes/4.'
+      - id: M3
+        check: 'Edit back: Edit again, set "Computers", Save -> "edited" tag disappears, Apply disabled (no pending changes). Then edit to "Computers & Tablets" again.'
+      - id: M4
+        check: 'Add child chain: with Computers selected, Add child "Tablets" -> new italic row "Tablets" with green "new" tag under Computers, selected (data-testid cache-node-tmp-1). Add child "iPad" under it -> nested row tmp-2 under Tablets. Apply badge "3". Still no network request.'
+      - id: M5
+        check: 'Apply happy path: click Apply -> exactly one POST /api/nodes/apply with body {"edits":[{"id":4,"value":"Computers & Tablets"}],"adds":[{"tempId":"tmp-1","parentId":4,"value":"Tablets"},{"tempId":"tmp-2","parentTempId":"tmp-1","value":"iPad"}],"deletes":[],"refreshIds":[4]}; 200. Success toast "Changes applied" / "1 edit(s), 2 addition(s), 0 deletion(s) saved.". All tags gone; rows now have numeric keys (cache-node-<id> with ids > 30 from the response idMap); selection stays on the (re-keyed) iPad row; Apply disabled. The DB tree refreshes (GET /api/nodes/roots + children of previously expanded nodes): Electronics > "Computers & Tablets" > Tablets > iPad visible after expanding, previous DB expansion kept.'
+      - id: M6
+        check: 'Cascade pending delete: load 1 (Electronics), 10 (Laptops), 26 (Ultrabook 13-inch). Select Laptops, click Delete -> Laptops and Ultrabook 13-inch show struck-through with red "to delete" tag; no network request. Selecting either of them disables Edit / Add child / Delete; Electronics stays editable.'
+      - id: M7
+        check: 'Open risk 2 — load under pending delete: load 27 (Ultrabook 15-inch) and 18 (Ultrabooks) -> both appear under Laptops already marked "to delete" with actions disabled. Reload 26 -> still "to delete".'
+      - id: M8
+        check: 'Edits / adds under a deleted ancestor: load 5 (Phones); edit it to "Mobile" ("edited"); add child "Foldables" under Phones ("new"). Then select Electronics and Delete -> every Electronics row shows "to delete" (incl. Mobile and Foldables). Apply -> request body has "edits":[], "adds":[], "deletes":[1] and "refreshIds" = every cached real id ascending (incl. 4, 5, 10, 18, 26, 27 and the ids created in M5). After 200: Foldables row is gone; Phones shows its DB value "Phones" with grey "deleted" tag; all other cached rows show "deleted" without any reload (open risk 1); Apply disabled.'
+      - id: M9
+        check: 'Delete a temp node only: load 2 (Books), Add child "Drafts", select Drafts, Delete -> "to delete". Apply -> body {"edits":[],"adds":[],"deletes":[],"refreshIds":[...every cached real id...]}; 200; Drafts row removed; toast "0 edit(s), 0 addition(s), 0 deletion(s) saved.".'
+      - id: M10
+        check: 'Failure keeps pending state: edit Books to "Books 2". Run `docker compose stop api`. Apply -> error toast; Books still shows "Books 2" with "edited", Apply enabled again after the spinner. `docker compose start api`, wait ~5 s, Apply -> 200, tag gone.'
+      - id: M11
+        check: 'Stale 409: load 3 (Home and Garden), edit it to "Home". Run `curl -s -X POST http://localhost:3000/api/nodes/apply -H "Content-Type: application/json" -d "{\"edits\":[],\"adds\":[],\"deletes\":[3]}"`. Apply in the UI -> 409 error toast; "Home" + "edited" kept. Select Home and Garden in the (stale) DB tree, Load into cache -> row shows "Home and Garden" with "deleted" tag (edit discarded), actions disabled, Apply disabled.'
+      - id: M12
+        check: 'Validation: Add child with 201 characters -> inline error "Value must be at most 200 characters."; Cancel closes the dialog without changes; Escape also closes it.'
+      - id: M13
+        check: 'Reset clears pending: make an edit and an add, click Reset and confirm -> cache empty, DB back to seed (Electronics and Books not deleted when expanded); a new Add child after loading a node gets key tmp-1 again.'
+
+test_matrix:
+  owner: docs-and-tests (workflow test phase); the implementer writes only S2 (smoke) and S3 (complete pin guard)
+  conventions:
+    - Files - src/cache/pending.test.ts (extend S2; keep the smoke test), src/stores/cache.pending.test.ts (new), src/stores/dbTree.test.ts (new). Do not edit src/stores/cache.test.ts, src/cache/hierarchy.test.ts or src/dependencyPins.test.ts.
+    - Explicit imports from 'vitest' (describe, it, expect, beforeEach, vi); no globals; Node environment; no jsdom, no component mounting.
+    - "Store tests mock the API module at the top of the file: `vi.mock('../api/client', () => ({ applyChanges: vi.fn() }))` in cache.pending.test.ts and `vi.mock('../api/client', () => ({ getRoots: vi.fn(), getChildren: vi.fn() }))` in dbTree.test.ts; import the mocked functions from '../api/client' and use vi.mocked(fn).mockResolvedValueOnce / mockRejectedValueOnce / mockReturnValueOnce(deferred promise). beforeEach: setActivePinia(createPinia()) and vi.mocked(fn).mockReset()."
+    - Seed-shaped fixtures (ids and ancestorIds from backend SeedData) - 1 [], 2 [], 3 [], 4 [1], 5 [1], 10 [1,4], 18 [1,4,10], 26 [1,4,10,18], 27 [1,4,10,18]. NodeDetails value `Node <id>` unless stated.
+    - Test files must type-check under tsconfig.app.json strict rules (npm run build).
+  pending_cases:   # src/cache/pending.ts, plain objects (use the S2 `node` helper)
+    - { id: P1, case: "validateValue", given: "'', '   ', ' a ', 'x'.repeat(200), 'x'.repeat(201), ' ' + 'x'.repeat(200) + ' '", expect: "error 'Value must not be empty.' twice; null; null; 'Value must be at most 200 characters.'; null" }
+    - { id: P2, case: "nodeStatus priority", given: "flags {isDeleted,isPendingDelete,isNew,isEdited} combos", expect: "isDeleted wins -> 'deleted'; then 'pending-delete'; new+edited -> 'new'; edited -> 'edited'; none -> 'clean'" }
+    - { id: P3, case: "pending delete cascades to cached descendants across gaps", given: "1, 10 (isPendingDelete), 26 (anc [1,4,10,18]; 18 uncached), 5", expect: "26.isPendingDelete true; 1 and 5 false" }
+    - { id: P4, case: "temp nodes under pending delete", given: "10 pending, tmp-1 (anc [1,4,10]), tmp-2 (anc [1,4,10,'tmp-1'])", expect: "both temp isPendingDelete true" }
+    - { id: P5, case: "derived isDeleted + normalisation", given: "10 isDeleted; 26 real with isEdited true, value 'Local', originalValue 'Node 26', isPendingDelete true; tmp-1 under 26", expect: "26.isDeleted true, isPendingDelete false, isEdited false, value 'Node 26'; tmp-1.isPendingDelete true, tmp-1.isDeleted false" }
+    - { id: P6, case: "order independence", given: "same set as P3 inserted into the record in reverse key order", expect: "identical flags to P3" }
+    - { id: P7, case: "top-most deletes only", given: "1, 4, 10 all isPendingDelete; 2 isPendingDelete", expect: "request.deletes [1, 2]; pendingDeleteKeys ['1','2','4','10']" }
+    - { id: P8, case: "already-deleted pending node not sent", given: "10 isDeleted true and isPendingDelete true (set after construction, no propagate)", expect: "deletes []; pendingDeleteKeys ['10']" }
+    - { id: P9, case: "edits filter", given: "4 isEdited value 'A'; 10 isEdited + isPendingDelete; 26 isEdited under pending 10; 5 isEdited + isDeleted", expect: "edits [{id:4,value:'A'}]; editedKeys ['4']; discardedEditKeys ['5','10','26']" }
+    - { id: P10, case: "adds with parentId / parentTempId in creation order", given: "4; tmp-2 (anc [1,4], parent 4); tmp-10 (anc [1,4,'tmp-2'], parent 'tmp-2')", expect: "adds [{tempId:'tmp-2',parentId:4,value},{tempId:'tmp-10',parentTempId:'tmp-2',value}]; no parentTempId key on the first, no parentId key on the second" }
+    - { id: P11, case: "dropped temps", given: "4 pending; tmp-1 under 4; 1 clean; tmp-2 under 1 isPendingDelete; tmp-3 under tmp-2; tmp-4 with ancestorIds [99] (99 uncached)", expect: "adds []; droppedTempKeys ['tmp-1','tmp-2','tmp-3','tmp-4']" }
+    - { id: P12, case: "new node with edited value goes to adds only", given: "tmp-1 under 1 with value 'Changed'", expect: "adds[0].value 'Changed'; edits []" }
+    - { id: P13, case: "refreshIds", given: "26, 1, 10 (isDeleted), 4 (isPendingDelete), tmp-1", expect: "refreshIds [1, 4, 10, 26]" }
+    - { id: P14, case: "empty arrays when only a dropped temp is pending", given: "1, tmp-1 under 1 isPendingDelete", expect: "request {edits:[],adds:[],deletes:[],refreshIds:[1]}; droppedTempKeys ['tmp-1']" }
+    - { id: P15, case: "settleApplied", given: "plan from {4 edited, 10 pending, 26 pending (under 10), tmp-1 under 4, tmp-2 under tmp-1, tmp-3 under 10 (dropped)}; idMap {'tmp-1':31,'tmp-2':32}", expect: "keys ['4','10','26','31','32'] (tmp-3 removed); 4.isEdited false; 10/26 isPendingDelete false; node 31 id 31, isNew false, parentId 4; node 32 parentId 31, ancestorIds [1,4,31]; returned record is a new object" }
+    - { id: P16, case: "settleApplied without idMap entry", given: "plan with addedKeys ['tmp-1']; idMap {}", expect: "tmp-1 keeps key 'tmp-1' and isNew true" }
+    - { id: P17, case: "rekeyId / rekeyKey / rekeySelection / rekeyExpanded", given: "idMap {'tmp-1':31}; dropped ['tmp-2']", expect: "rekeyId('tmp-1')=31, rekeyId(5)=5, rekeyId('tmp-9')='tmp-9'; rekeyKey('tmp-1')='31', rekeyKey('4')='4'; rekeySelection('tmp-2')=null, ('tmp-1')='31', (null)=null; rekeyExpanded({'1':true,'tmp-1':true,'tmp-2':true,'5':false}) = {'1':true,'31':true}" }
+    - { id: P18, case: "describeApplyPlan", given: "plan with 1 edit, 2 adds, 0 deletes", expect: "'1 edit(s), 2 addition(s), 0 deletion(s) saved.'" }
+    - { id: P19, case: "canModify / hasEffectivelyDeletedAncestor", given: "1 clean; 10 pending; 26 under 10 with isPendingDelete false (no propagate); 5 isDeleted", expect: "canModify(1) true; canModify(10) false; canModify(26) false; canModify(5) false" }
+  store_cases:   # src/stores/cache.pending.test.ts (applyChanges mocked)
+    - { id: C13, case: "editValue real node", given: "loadNode 4; editValue(4, '  New  ')", expect: "returns true; value 'New'; isEdited true; pendingCount 1; editValue(4, 'Node 4') -> isEdited false, hasPendingChanges false" }
+    - { id: C14, case: "editValue rejections", given: "loadNode 4; editValue(4, '   '); editValue(999, 'x'); loadNode 10 isDeleted -> editValue(10, 'x'); deleteNode(4) then editValue(4, 'x')", expect: "all return false; values unchanged" }
+    - { id: C15, case: "editValue temp node", given: "loadNode 1; addChild(1, 'A'); editValue('tmp-1', 'B')", expect: "true; value 'B'; isEdited false; isNew true" }
+    - { id: C16, case: "addChild", given: "loadNode 1; addChild(1, ' A '); addChild('tmp-1', 'B')", expect: "returns 'tmp-1' then 'tmp-2'; tmp-1 {parentId 1, ancestorIds [1], value 'A', originalValue '', isNew true, hasChildren false}; tmp-2 {parentId 'tmp-1', ancestorIds [1,'tmp-1']}; nextTempSeq 3; expandedKeys has '1','tmp-1','tmp-2'; selectedKey 'tmp-2'; treeNodes 1 > tmp-1 > tmp-2" }
+    - { id: C17, case: "addChild rejections", given: "loadNode 10 isDeleted -> addChild(10,'x'); loadNode 1, deleteNode(1) -> addChild(1,'x'); addChild(2,'') after loadNode 2", expect: "null each time; no tmp nodes; nextTempSeq unchanged (1)" }
+    - { id: C18, case: "deleteNode cascade", given: "loadNode 1, 10, 26; addChild(10,'T'); deleteNode(10)", expect: "true; 10, 26, tmp-1 isPendingDelete true; 1 false; deleteNode(26) now false; canModifySelected false when selectedKey '26'" }
+    - { id: C19, case: "load under pending delete (insert branch)", given: "loadNode 1, 10; deleteNode(10); loadNode 27", expect: "nodes['27'].isPendingDelete true; nodeStatus 'pending-delete'" }
+    - { id: C20, case: "reload under pending delete (refresh branch)", given: "loadNode 10, 26; deleteNode(10); set nodes['26'].isPendingDelete = false manually; loadNode 26", expect: "nodes['26'].isPendingDelete true again" }
+    - { id: C21, case: "derived deleted on reload of ancestor", given: "loadNode 10, 26 (both clean); loadNode 10 with isDeleted true", expect: "nodes['26'].isDeleted true without reloading 26" }
+    - { id: C22, case: "apply success", given: "loadNode 1, 4, 10, 26; editValue(4,'Comp'); addChild(4,'T'); addChild('tmp-1','U'); deleteNode(10); selectedKey is 'tmp-2'. Mock resolves {idMap:{'tmp-1':31,'tmp-2':32}, nodes: details 1, 4 (value 'Comp'), 10 isDeleted, 26 isDeleted, 31 (parentId 4, anc [1,4], value 'T'), 32 (parentId 31, anc [1,4,31], value 'U')}", expect: "applyChanges called once with {edits:[{id:4,value:'Comp'}], adds:[{tempId:'tmp-1',parentId:4,value:'T'},{tempId:'tmp-2',parentTempId:'tmp-1',value:'U'}], deletes:[10], refreshIds:[1,4,10,26]}; result is the plan; keys ['1','4','10','26','31','32']; no pending flags anywhere; 10 and 26 isDeleted; 4.value 'Comp' and originalValue 'Comp'; selectedKey '32'; expandedKeys has '31','32' and no 'tmp-*'; applying false; hasPendingChanges false" }
+    - { id: C23, case: "apply drops temp under pending delete and discards edits", given: "loadNode 1, 5; editValue(5,'M'); addChild(5,'F'); deleteNode(1). Mock resolves {idMap:{}, nodes: 1 and 5 isDeleted}", expect: "request edits [], adds [], deletes [1]; after: 'tmp-1' gone; 5.value 'Node 5', isEdited false, isDeleted true" }
+    - { id: C24, case: "apply failure keeps everything", given: "state as C22 before apply; record JSON.stringify of nodes, selectedKey, expandedKeys, nextTempSeq; mock rejects new Error('boom')", expect: "apply() rejects with 'boom'; recorded state identical; applying false; hasPendingChanges true" }
+    - { id: C25, case: "apply ignored after Reset (epoch)", given: "pending edit; mock returns a deferred promise; call apply() (do not await); clear(); resolve the deferred with a valid response; await the apply promise", expect: "result null; isEmpty true; applying false" }
+    - { id: C26, case: "apply no-op", given: "loadNode 1 (nothing pending)", expect: "apply() resolves null; applyChanges not called" }
+    - { id: C27, case: "actions rejected while applying", given: "pending edit on 4 with 1 also loaded; deferred mock; start apply(); while pending: editValue(1,'x') / addChild(1,'x') / deleteNode(1); second apply()", expect: "false / null / false / null; applyChanges called once; canModifySelected false" }
+  dbtree_cases:   # src/stores/dbTree.test.ts (getRoots/getChildren mocked)
+    - { id: R1, case: "refresh keeps expansion and selection", given: "setRoots([1,2]) (both hasChildren true); getChildren(1)->[4,5]; loadChildren('1'); getChildren(4)->[10] (4 hasChildren true); loadChildren('4'); expandedKeys {'1':true,'4':true}; selectionKeys {'10':true}. Then getRoots->[1,2], getChildren(1)->[4,5], getChildren(4)->[10,31]; refresh()", expect: "getChildren called for 1 then 4 (two levels); node 4 children keys ['10','31']; expandedKeys {'1':true,'4':true}; selectionKeys {'10':true}" }
+    - { id: R2, case: "refresh drops state for vanished nodes", given: "after loadChildren('1') with selection {'5':true}; refresh where getChildren(1) -> [4] only", expect: "selectionKeys {}" }
+    - { id: R3, case: "refresh aborted by setRoots", given: "getRoots returns a deferred; start refresh(); setRoots([3]); resolve deferred with [1,2]", expect: "roots keys ['3'] (refresh result discarded); getChildren not called" }
+    - { id: R4, case: "leaf flag updated", given: "node 2 (hasChildren false) loaded as root; refresh where getRoots returns 2 with hasChildren true", expect: "root '2' leaf false" }
+
+contract_changes_requested: []
+
+docs_and_tests_updates:
+  frontend_claude_md:   # frontend/CLAUDE.md (docs-and-tests rewrites the affected lines)
+    - "Layout: add `src/cache/pending.ts` (pure pending-change logic: validateValue, propagateDeletes, nodeStatus, buildApplyPlan, settleApplied, re-key helpers) next to model.ts / hierarchy.ts; `src/components/NodeValueDialog.vue` (Edit / Add child dialog); tests `src/cache/pending.test.ts`, `src/stores/cache.pending.test.ts`, `src/stores/dbTree.test.ts`, `src/dependencyPins.test.ts`."
+    - "Layout: cache store line no longer says edit/add/delete/apply are stubs; it now: load, refresh, hierarchy, expansion, pending edit/add/delete, apply; `src/stores/dbTree.ts` has `refresh()` used after Apply."
+    - "Conventions: pending-change rules live in src/cache/pending.ts (pure); the store only orchestrates. `propagateDeletes` must run after every merge and every delete."
+    - "Conventions: apply always sends refreshIds = every cached real id (client_rules.refresh_ids); on failure the cache state must stay untouched; on success settle -> re-key -> mergeServerNodes, in that order."
+    - "Conventions: temp ids are `tmp-<n>` from nextTempSeq; real ids are opaque (only from idMap / server) and may have gaps — never compute ids."
+    - "Conventions: Edit / Add child / Delete are disabled and rejected for effectively deleted nodes (isDeleted || isPendingDelete || such a cached ancestor) and while applying."
+    - "Conventions: primevue 4.3.3 + @primeuix/themes 1.0.3 + @primeuix/styles 1.0.3 (dependencies AND overrides) are pinned together; src/dependencyPins.test.ts fails if they drift — upgrade only together, via a plan."
+    - "Design decisions: add link docs/plans/stage-4-frontend.md."
+  readme_frontend_outline:   # sections/sentences docs-and-tests puts into the final README.md (frontend part)
+    - "UI usage: select a DB node -> Load into cache; in the cache select a node -> Edit / Add child / Delete; changes are tagged new / edited / to delete and stay local until Apply; Apply sends one transactional batch; Reset restores the sample data and clears the cache."
+    - "Cache hierarchy: flat node map; each node shown under its nearest cached ancestor (ancestorIds from GET /api/nodes/{id}); '…' marker for levels that are not loaded."
+    - "Pending changes: temp ids tmp-<n> (also for children of new nodes), mapped to real ids from the apply response idMap; delete cascades to every cached descendant immediately and to never-loaded descendants in the DB on Apply; nodes loaded later under a node marked for deletion are shown as to delete; deleted / to-delete nodes cannot be edited."
+    - "Edge cases: edits and new children under a node marked for deletion are not sent (they would end up deleted anyway); after Apply every cached node is refreshed (refreshIds) so cascaded deletions show without reloading; a failed Apply keeps all pending changes."
+    - "Frontend tests: `cd frontend && npm test` (Vitest, Node env: hierarchy, pending-change logic, stores with mocked API, PrimeVue pin guard)."
+
+cross_plan_notes:
+  - "Consumes api-contract v2 + client_rules as-is: POST /api/nodes/apply with top-most deletes, refreshIds = every real cached id ascending, adds with parentId / parentTempId. Matches the request shapes asserted by backend ApplyClientFlowTests (stage-4-backend)."
+  - "409/404 nodeIds are not highlighted (optional per client_rules.failure_handling); the toast shows ProblemDetails title/detail (ApiError.detail)."
+  - "Stage 5 restyle must keep: NodeLabel status values (clean/new/edited/pending-delete/deleted), data-status / data-testid attributes, store API (editValue/addChild/deleteNode/apply/canModifySelected/pendingCount) and dbTree.refresh after Apply; it replaces NodeValueDialog by the design's inline editor."

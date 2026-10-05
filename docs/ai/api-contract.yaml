@@ -5,6 +5,7 @@ stage_introduced: 2
 changelog:
   - "v1 (stage 2): reads, reset, apply route returning 501."
   - "v2 (stage 3): apply implemented (501 removed); serialization of apply/reset; refreshIds rule; request limits; validation error keys; error precedence."
+  - "v2 + client_rules (stage 4): no wire changes; added binding client_rules for the cache (refreshIds, pending-delete propagation, request building, failure handling)."
 
 base_url:
   api_direct: http://localhost:8080        # api container, published port
@@ -137,6 +138,34 @@ apply_semantics:
     the cascade) or runs after (and gets 409). The invariant "every descendant of a deleted node is deleted" always holds.
   hierarchy_note: >
     Parent–child relations never change, so ancestorIds of a node are stable for its lifetime (until Reset).
+
+client_rules:
+  description: >
+    Binding rules for the cache client (frontend). No wire format impact; the server behaves as specified above
+    regardless. Added in stage 4 to close stage-3 open risks 1 and 2 and the roadmap stage-4 edge cases.
+  refresh_ids: >
+    Every apply request sends refreshIds = every real (numeric) id held in the cache, ascending, including
+    deleted and pending-delete nodes. After a 200, the client merges response.nodes so cached descendants of a
+    cascade-deleted node show isDeleted=true immediately (no reload needed). (Closes stage-3 open risk 1.)
+  pending_delete_propagation: >
+    A node is "effectively deleted" in the cache when it isDeleted (server) or isPendingDelete (local).
+    Deleting a node marks it and every cached descendant (ancestorIds contains its id) isPendingDelete.
+    A node inserted into the cache (load) whose ancestorIds contain an effectively deleted cached node is
+    inserted with isPendingDelete=true if that ancestor is pending-delete (server isDeleted already comes from
+    the DB). The same check runs on re-load of an already cached node. (Closes stage-3 open risk 2.)
+  no_actions_on_deleted: Edit, add child and delete are rejected (no-op) for effectively deleted nodes; the UI disables them.
+  request_building: >
+    deletes = ids of real nodes marked isPendingDelete whose nearest pending-delete ancestor is not also in
+    deletes (sending only top-most is sufficient; sending all is also valid). Temp (isNew) nodes that are
+    pending-delete, or under a pending-delete/deleted ancestor, are dropped and never sent in adds.
+    edits = real nodes with isEdited, not isDeleted, and not isPendingDelete (an edit under a pending delete is
+    discarded because the node ends deleted anyway; the server's same_batch_rule would give the same result).
+    adds = remaining isNew nodes, parentId for a real parent or parentTempId for a temp parent.
+  failure_handling: >
+    On any non-2xx apply response the cache keeps all pending state unchanged (nothing persisted server-side,
+    see apply_semantics.atomic) and shows the ProblemDetails title/detail. On 409/404 the nodeIds extension may
+    be used to highlight offending nodes; the user can reload them to see the current DB state.
+  reset: Reset clears the whole cache, including pending changes, and bumps the cache epoch (stage-3 race guard).
 
 endpoints:
   - id: health

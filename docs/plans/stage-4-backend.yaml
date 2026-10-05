@@ -1,0 +1,573 @@
+# Stage 4 backend plan — executable literally. Human rationale: docs/plans/stage-4-backend.md
+# RESULT OF VERIFICATION: NO production backend code changes. backend/src/ must stay byte-identical.
+# All steps are tests (docs-and-tests) and documentation (docs-and-tests). No plan-implementer dispatch for backend.
+stage: 4
+name: cache-pending-changes
+project: backend
+
+scope:
+  production_code_changes: none
+  docs_and_tests_may_write:
+    - backend/tests/TreeEditor.Api.Tests/Apply/ApplyClientFlowTests.cs
+    - backend/tests/TreeEditor.Api.Tests/Apply/ApplyAtomicityTests.cs
+    - README.md            # backend sections only, per readme_backend_outline
+    - backend/CLAUDE.md    # per backend_claude_md_points
+  must_not_write:
+    - backend/src/
+    - backend/tests/TreeEditor.Api.Tests/Infrastructure/
+    - frontend/
+    - docker-compose.yml
+    - docs/ai/api-contract.yaml
+    - docs/plans/
+
+environment:
+  os: macOS
+  dotnet_sdk: 8.0.422
+  docker: "Docker Desktop, compose v2 (Testcontainers needs it running)"
+  all_paths_relative_to_repo_root: /Users/maczone/Desktop/personal/test_qit
+
+fixed_versions:
+  target_framework: net8.0
+  new_nuget_packages: none
+  schema_or_migration_changes: none
+
+prerequisites:
+  scaffold_commands: []     # nothing for chore-runner
+  must_hold_before_start:
+    - "Stage 3 is committed; `cd backend && dotnet build TreeEditor.sln` succeeds."
+    - "`cd backend && dotnet test TreeEditor.sln` is green before any change."
+    - Docker Desktop is running.
+
+# Facts the expected values below rely on (do not change them):
+#   Seed ids 1..30; every test starts from Reset (IntegrationTestBase.InitializeAsync) so the next id is 31.
+#   Tests in ApiCollection run one at a time (shared collection).
+#   Insert order of adds = breadth-first: real-parent adds in request order, then temp children level by level.
+#   Subtrees: 4 -> {4,10,11,18,19,26,27}; 10 -> {10,18,19,26,27}; 1 -> 14 nodes; 18 -> {18,26,27}.
+#   Ancestors of 30: [3,9,17,25]; of 11: [1,4]; of 26: [1,4,10,18].
+
+steps:
+  - id: 1
+    owner: docs-and-tests
+    title: Stage-4 client-flow integration tests (new file)
+    files:
+      - { path: backend/tests/TreeEditor.Api.Tests/Apply/ApplyClientFlowTests.cs, action: create }
+    instructions:
+      - Create the file with exactly this content.
+      - path: backend/tests/TreeEditor.Api.Tests/Apply/ApplyClientFlowTests.cs
+        content: |
+          using System.Net;
+          using Microsoft.EntityFrameworkCore;
+          using TreeEditor.Api.Tests.Infrastructure;
+          using Xunit;
+
+          namespace TreeEditor.Api.Tests.Apply;
+
+          /// <summary>
+          /// Stage-4 client flows (api-contract client_rules): requests shaped exactly as the cache builds them —
+          /// top-most deletes only, refreshIds = every cached real id ascending, temp chains in any order.
+          /// </summary>
+          [Collection(ApiCollection.Name)]
+          public sealed class ApplyClientFlowTests(ApiFactory factory) : IntegrationTestBase(factory), IAsyncLifetime
+          {
+              // Re-implements IAsyncLifetime so the invariant is checked after every test in this class.
+              async Task IAsyncLifetime.DisposeAsync()
+              {
+                  var violations = await Factory.WithDbAsync(db =>
+                      db.Database.SqlQueryRaw<int>(ApplyHttp.InvariantSql).SingleAsync());
+                  Assert.Equal(0, violations);
+                  await base.DisposeAsync();
+              }
+
+              [Fact]
+              public async Task Client_batch_with_deep_temp_chain_edits_topmost_delete_and_full_refresh()
+              {
+                  var body = await Client.ApplyOkAsync("""
+                      {"edits":[{"id":11,"value":"Desktop PCs"},{"id":14,"value":"Sci-Fi"}],
+                       "adds":[
+                        {"tempId":"tmp-4","parentTempId":"tmp-3","value":"Level 4"},
+                        {"tempId":"tmp-3","parentTempId":"tmp-2","value":"Level 3"},
+                        {"tempId":"tmp-2","parentTempId":"tmp-1","value":"Level 2"},
+                        {"tempId":"tmp-1","parentId":2,"value":"Level 1"},
+                        {"tempId":"tmp-5","parentId":11,"value":"Workstations"}],
+                       "deletes":[10],
+                       "refreshIds":[1,2,4,7,10,11,14,18,26,27]}
+                      """);
+
+                  Assert.Equal(31, body.IdMap["tmp-1"]);
+                  Assert.Equal(32, body.IdMap["tmp-5"]);
+                  Assert.Equal(33, body.IdMap["tmp-2"]);
+                  Assert.Equal(34, body.IdMap["tmp-3"]);
+                  Assert.Equal(35, body.IdMap["tmp-4"]);
+                  Assert.Equal(
+                      new long[] { 1, 2, 4, 7, 10, 11, 14, 18, 26, 27, 31, 32, 33, 34, 35 },
+                      body.Nodes.Select(n => n.Id).ToArray());
+
+                  var byId = body.Nodes.ToDictionary(n => n.Id);
+                  foreach (var id in new long[] { 10, 18, 26, 27 })
+                  {
+                      Assert.True(byId[id].IsDeleted, $"node {id} should be deleted");
+                  }
+
+                  foreach (var id in new long[] { 1, 2, 4, 7, 11, 14, 31, 32, 33, 34, 35 })
+                  {
+                      Assert.False(byId[id].IsDeleted, $"node {id} should not be deleted");
+                  }
+
+                  Assert.Equal("Desktop PCs", byId[11].Value);
+                  Assert.Equal("Sci-Fi", byId[14].Value);
+                  Assert.Equal(new long[] { 2 }, byId[31].AncestorIds);
+                  Assert.True(byId[31].HasChildren);
+                  Assert.Equal(34, byId[35].ParentId);
+                  Assert.Equal(new long[] { 2, 31, 33, 34 }, byId[35].AncestorIds);
+                  Assert.False(byId[35].HasChildren);
+                  Assert.Equal(11, byId[32].ParentId);
+                  Assert.Equal(new long[] { 1, 4, 11 }, byId[32].AncestorIds);
+
+                  await Factory.WithDbAsync(async db =>
+                  {
+                      Assert.Equal(35, await db.Nodes.CountAsync());
+                      var deleted = await db.Nodes.Where(n => n.IsDeleted).Select(n => n.Id).OrderBy(id => id).ToArrayAsync();
+                      Assert.Equal(new long[] { 10, 18, 19, 26, 27 }, deleted);
+                  });
+              }
+
+              [Fact]
+              public async Task Refresh_includes_nodes_deleted_by_an_earlier_apply_without_conflict()
+              {
+                  await Client.ApplyOkAsync("""{"edits":[],"adds":[],"deletes":[18]}""");
+
+                  var body = await Client.ApplyOkAsync("""{"edits":[],"adds":[],"deletes":[4],"refreshIds":[4,10,18,26]}""");
+
+                  Assert.Equal(new long[] { 4, 10, 18, 26 }, body.Nodes.Select(n => n.Id).ToArray());
+                  Assert.All(body.Nodes, n => Assert.True(n.IsDeleted));
+                  var deleted = await Factory.WithDbAsync(db =>
+                      db.Nodes.Where(n => n.IsDeleted).Select(n => n.Id).OrderBy(id => id).ToArrayAsync());
+                  Assert.Equal(new long[] { 4, 10, 11, 18, 19, 26, 27 }, deleted);
+              }
+
+              [Fact]
+              public async Task Stale_cache_changes_under_ancestor_deleted_by_another_client_are_409_and_persist_nothing()
+              {
+                  // Another client deletes 4; its cascade reaches 18 and 26, which this client still holds as live.
+                  await Client.ApplyOkAsync("""{"edits":[],"adds":[],"deletes":[4]}""");
+
+                  var response = await Client.ApplyAsync("""
+                      {"edits":[{"id":26,"value":"x"},{"id":2,"value":"Books2"}],
+                       "adds":[
+                        {"tempId":"tmp-1","parentId":18,"value":"A"},
+                        {"tempId":"tmp-2","parentTempId":"tmp-1","value":"B"},
+                        {"tempId":"tmp-3","parentId":3,"value":"C"}],
+                       "deletes":[],
+                       "refreshIds":[2,3,18,26]}
+                      """);
+
+                  Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+                  var (problem, ids) = await ApplyHttp.ReadProblemAsync(response);
+                  Assert.Equal("Conflict", problem.Title);
+                  Assert.Equal(new long[] { 18, 26 }, ids);
+                  await Factory.WithDbAsync(async db =>
+                  {
+                      Assert.Equal(30, await db.Nodes.CountAsync());
+                      Assert.Equal("Books", (await db.Nodes.FindAsync(2L))!.Value);
+                      Assert.Equal("Ultrabook 13-inch", (await db.Nodes.FindAsync(26L))!.Value);
+                  });
+              }
+
+              [Fact]
+              public async Task Stale_delete_of_node_already_cascade_deleted_by_another_client_succeeds()
+              {
+                  await Client.ApplyOkAsync("""{"edits":[],"adds":[],"deletes":[1]}""");
+
+                  var body = await Client.ApplyOkAsync("""
+                      {"edits":[{"id":2,"value":"Books2"}],"adds":[{"tempId":"tmp-1","parentId":2,"value":"New"}],"deletes":[26],"refreshIds":[2,26]}
+                      """);
+
+                  Assert.Equal(31, body.IdMap["tmp-1"]);
+                  Assert.Equal(new long[] { 2, 26, 31 }, body.Nodes.Select(n => n.Id).ToArray());
+                  Assert.True(body.Nodes.Single(n => n.Id == 26).IsDeleted);
+                  Assert.Equal("Books2", body.Nodes.Single(n => n.Id == 2).Value);
+                  Assert.False(body.Nodes.Single(n => n.Id == 31).IsDeleted);
+              }
+
+              [Fact]
+              public async Task Real_ids_from_idMap_are_used_by_the_next_apply()
+              {
+                  var first = await Client.ApplyOkAsync("""
+                      {"edits":[],"adds":[{"tempId":"tmp-1","parentId":30,"value":"A"},{"tempId":"tmp-2","parentTempId":"tmp-1","value":"B"}],"deletes":[],"refreshIds":[30]}
+                      """);
+                  Assert.Equal(31, first.IdMap["tmp-1"]);
+                  Assert.Equal(32, first.IdMap["tmp-2"]);
+
+                  var second = await Client.ApplyOkAsync("""
+                      {"edits":[{"id":31,"value":"A2"}],"adds":[{"tempId":"tmp-3","parentId":32,"value":"C"}],"deletes":[],"refreshIds":[30,31,32]}
+                      """);
+                  Assert.Equal(33, second.IdMap["tmp-3"]);
+                  Assert.Equal("A2", second.Nodes.Single(n => n.Id == 31).Value);
+                  Assert.True(second.Nodes.Single(n => n.Id == 32).HasChildren);
+                  Assert.Equal(new long[] { 3, 9, 17, 25, 30, 31, 32 }, second.Nodes.Single(n => n.Id == 33).AncestorIds);
+
+                  var third = await Client.ApplyOkAsync("""{"edits":[],"adds":[],"deletes":[31],"refreshIds":[30,31,32,33]}""");
+                  Assert.Equal(new long[] { 30, 31, 32, 33 }, third.Nodes.Select(n => n.Id).ToArray());
+                  Assert.False(third.Nodes.Single(n => n.Id == 30).IsDeleted);
+                  Assert.All(third.Nodes.Where(n => n.Id > 30), n => Assert.True(n.IsDeleted));
+              }
+
+              [Fact]
+              public async Task Fifty_level_temp_chain_sent_deepest_first()
+              {
+                  var adds = Enumerable.Range(0, 50).Reverse().Select(i => i == 0
+                      ? """{"tempId":"tmp-0","parentId":30,"value":"L0"}"""
+                      : $$"""{"tempId":"tmp-{{i}}","parentTempId":"tmp-{{i - 1}}","value":"L{{i}}"}""");
+
+                  var body = await Client.ApplyOkAsync($$"""{"edits":[],"adds":[{{string.Join(",", adds)}}],"deletes":[]}""");
+
+                  for (var i = 0; i < 50; i++)
+                  {
+                      Assert.Equal(31 + i, body.IdMap[$"tmp-{i}"]);
+                  }
+
+                  var deepest = body.Nodes.Single(n => n.Id == 80);
+                  Assert.Equal(79, deepest.ParentId);
+                  Assert.Equal(54, deepest.AncestorIds.Count);
+                  Assert.Equal(new long[] { 3, 9, 17, 25, 30, 31 }, deepest.AncestorIds.Take(6).ToArray());
+                  Assert.Equal(79, deepest.AncestorIds[deepest.AncestorIds.Count - 1]);
+              }
+
+              [Fact]
+              public async Task RefreshIds_at_the_10000_limit_is_accepted()
+              {
+                  var refresh = string.Join(",", Enumerable.Range(1, 10000));
+
+                  var body = await Client.ApplyOkAsync($$"""{"edits":[],"adds":[],"deletes":[1],"refreshIds":[{{refresh}}]}""");
+
+                  Assert.Equal(30, body.Nodes.Count);
+                  Assert.Equal(14, body.Nodes.Count(n => n.IsDeleted));
+              }
+          }
+    done_when:
+      - File exists with exactly the content above.
+      - "`cd backend && dotnet build TreeEditor.sln -c Release --no-incremental` prints 0 Warning(s) and 0 Error(s)."
+      - "`cd backend && dotnet test TreeEditor.sln --filter \"FullyQualifiedName~ApplyClientFlowTests\"` reports Passed: 7, Failed: 0."
+
+  - id: 2
+    owner: docs-and-tests
+    title: Sequence-gap tests (stage-3 open risk 4) in ApplyAtomicityTests
+    files:
+      - { path: backend/tests/TreeEditor.Api.Tests/Apply/ApplyAtomicityTests.cs, action: replace }
+    instructions:
+      - >-
+        Overwrite the file with exactly this content. The existing fact Failure_in_later_operation_rolls_everything_back
+        keeps its name, request and assertions; only its trigger install/drop moves into the two private helpers.
+      - path: backend/tests/TreeEditor.Api.Tests/Apply/ApplyAtomicityTests.cs
+        content: |
+          using System.Net;
+          using Microsoft.EntityFrameworkCore;
+          using TreeEditor.Api.Tests.Infrastructure;
+          using Xunit;
+
+          namespace TreeEditor.Api.Tests.Apply;
+
+          [Collection(ApiCollection.Name)]
+          public sealed class ApplyAtomicityTests(ApiFactory factory) : IntegrationTestBase(factory)
+          {
+              // Test-only trigger that makes any UPDATE setting value = 'boom' fail. Reset does not drop triggers,
+              // so every test that installs it drops it in finally.
+              private Task InstallBoomTriggerAsync() =>
+                  Factory.WithDbAsync(async db =>
+                  {
+                      await db.Database.ExecuteSqlRawAsync("""
+                          CREATE OR REPLACE FUNCTION test_fail_on_boom() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.value = 'boom' THEN RAISE EXCEPTION 'boom'; END IF; RETURN NEW; END; $$
+                          """);
+                      await db.Database.ExecuteSqlRawAsync(
+                          "CREATE TRIGGER trg_test_fail_on_boom BEFORE UPDATE OF value ON nodes FOR EACH ROW EXECUTE FUNCTION test_fail_on_boom()");
+                  });
+
+              private Task DropBoomTriggerAsync() =>
+                  Factory.WithDbAsync(async db =>
+                  {
+                      await db.Database.ExecuteSqlRawAsync("DROP TRIGGER IF EXISTS trg_test_fail_on_boom ON nodes");
+                      await db.Database.ExecuteSqlRawAsync("DROP FUNCTION IF EXISTS test_fail_on_boom()");
+                  });
+
+              [Fact]
+              public async Task Failure_in_later_operation_rolls_everything_back()
+              {
+                  await InstallBoomTriggerAsync();
+                  try
+                  {
+                      var response = await Client.ApplyAsync("""
+                          {"edits":[{"id":3,"value":"boom"}],"adds":[{"tempId":"t1","parentId":2,"value":"New"}],"deletes":[7]}
+                          """);
+
+                      Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+                      Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+                      await Factory.WithDbAsync(async db =>
+                      {
+                          Assert.Equal(30, await db.Nodes.CountAsync());
+                          Assert.Equal("Home and Garden", (await db.Nodes.FindAsync(3L))!.Value);
+                          Assert.False((await db.Nodes.FindAsync(7L))!.IsDeleted);
+                      });
+                  }
+                  finally
+                  {
+                      await DropBoomTriggerAsync();
+                  }
+              }
+
+              // Known behaviour (stage-3 open risk 4): ids drawn by a rolled-back apply are never reused.
+              [Fact]
+              public async Task Rolled_back_adds_leave_a_sequence_gap()
+              {
+                  await InstallBoomTriggerAsync();
+                  try
+                  {
+                      var failed = await Client.ApplyAsync("""
+                          {"edits":[{"id":3,"value":"boom"}],"adds":[{"tempId":"t1","parentId":2,"value":"New"},{"tempId":"t2","parentTempId":"t1","value":"New child"}],"deletes":[]}
+                          """);
+                      Assert.Equal(HttpStatusCode.InternalServerError, failed.StatusCode);
+                  }
+                  finally
+                  {
+                      await DropBoomTriggerAsync();
+                  }
+
+                  var next = await Client.ApplyOkAsync("""{"edits":[],"adds":[{"tempId":"t","parentId":2,"value":"After failure"}],"deletes":[]}""");
+
+                  Assert.Equal(33, next.IdMap["t"]);
+                  await Factory.WithDbAsync(async db =>
+                  {
+                      Assert.Equal(31, await db.Nodes.CountAsync());
+                      Assert.False(await db.Nodes.AnyAsync(n => n.Id == 31 || n.Id == 32));
+                  });
+              }
+
+              // 400 is rejected before the DB, 404/409 before ids are allocated: none of them consumes an id.
+              [Fact]
+              public async Task Validation_not_found_and_conflict_failures_consume_no_ids()
+              {
+                  await Client.ApplyOkAsync("""{"edits":[],"adds":[],"deletes":[5]}""");
+
+                  var conflict = await Client.ApplyAsync("""{"edits":[],"adds":[{"tempId":"t","parentId":5,"value":"x"}],"deletes":[]}""");
+                  Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+                  var notFound = await Client.ApplyAsync("""{"edits":[],"adds":[{"tempId":"t","parentId":999999,"value":"x"}],"deletes":[]}""");
+                  Assert.Equal(HttpStatusCode.NotFound, notFound.StatusCode);
+                  var invalid = await Client.ApplyAsync("""{"edits":[],"adds":[{"tempId":"t","parentId":3,"value":"   "}],"deletes":[]}""");
+                  Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+
+                  var next = await Client.ApplyOkAsync("""{"edits":[],"adds":[{"tempId":"t","parentId":3,"value":"ok"}],"deletes":[]}""");
+
+                  Assert.Equal(31, next.IdMap["t"]);
+              }
+          }
+    done_when:
+      - File has exactly the content above.
+      - "`cd backend && dotnet test TreeEditor.sln --filter \"FullyQualifiedName~ApplyAtomicityTests\"` reports Passed: 3, Failed: 0."
+
+  - id: 3
+    owner: docs-and-tests
+    title: Full build and test run; production code untouched
+    files: []
+    instructions:
+      - run_from: /Users/maczone/Desktop/personal/test_qit/backend
+        commands:
+          - dotnet build TreeEditor.sln -c Release --no-incremental
+          - dotnet test TreeEditor.sln
+      - run_from: /Users/maczone/Desktop/personal/test_qit
+        commands:
+          - git status --porcelain -- backend/src
+      - >-
+        If any test fails: do NOT change backend/src or the expected values. Stop and report the failing test name,
+        the assertion message and the full request/response to the organizer (possible backend bug).
+    done_when:
+      - Build prints "0 Warning(s)" and "0 Error(s)".
+      - "`dotnet test TreeEditor.sln` prints Failed: 0; the total equals the stage-3 total + 9."
+      - "`git status --porcelain -- backend/src` prints nothing."
+
+  - id: 4
+    owner: docs-and-tests
+    title: README.md backend sections (final README)
+    files:
+      - { path: README.md, action: modify }
+    instructions:
+      - >-
+        Write the backend-owned sections listed in readme_backend_outline below, in that order, merged with the frontend
+        sections from docs/plans/stage-4-frontend.yaml. Keep every existing correct statement; apply the listed changes.
+        The status line at the top is set by the organizer / frontend plan (not by this plan).
+      - The "Known behaviour" section text is fixed: copy readme_backend_outline.known_behaviour.text verbatim.
+    done_when:
+      - "README.md contains the heading `## Quick start` followed by a bash block whose first line is exactly `docker compose up --build`."
+      - "README.md contains `trg_nodes_parent_immutable`, `ix_nodes_parent_id_id`, `pg_advisory_xact_lock(4242)` and `refreshIds`."
+      - "README.md contains the heading `## Known behaviour` and the exact sentence beginning `Ids are never reused`."
+      - "README.md no longer contains the phrase `from stage 3` or `arrives in stage 4`."
+
+  - id: 5
+    owner: docs-and-tests
+    title: backend/CLAUDE.md update
+    files:
+      - { path: backend/CLAUDE.md, action: modify }
+    instructions:
+      - Append each line of backend_claude_md_points as a bullet at the end of the "## Conventions" list. Change nothing else.
+    done_when:
+      - backend/CLAUDE.md contains `ApplyClientFlowTests` and `sequence gap`.
+
+# ---------------------------------------------------------------------------
+# Test matrix — what the new tests cover (all implemented verbatim in steps 1–2).
+# Existing tests already covering a scenario are listed under already_covered and must NOT be duplicated.
+# ---------------------------------------------------------------------------
+test_matrix:
+  new:
+    - path: backend/tests/TreeEditor.Api.Tests/Apply/ApplyClientFlowTests.cs
+      class_invariant: "ApplyHttp.InvariantSql returns 0 after every test"
+      cases:
+        - name: Client_batch_with_deep_temp_chain_edits_topmost_delete_and_full_refresh
+          covers: "V1, V2, V3, V4: edits [11,14]; 4-level temp chain under 2 sent deepest-first + sibling add under 11; top-most delete [10] only; refreshIds = all cached ids incl. pending-delete descendants 18,26,27"
+          expect: "idMap tmp-1=31, tmp-5=32, tmp-2=33, tmp-3=34, tmp-4=35; nodes ids [1,2,4,7,10,11,14,18,26,27,31..35]; 10,18,26,27 deleted; 35 ancestorIds [2,31,33,34]; DB 35 rows, deleted = {10,18,19,26,27} (19 never loaded)"
+        - name: Refresh_includes_nodes_deleted_by_an_earlier_apply_without_conflict
+          covers: "V1: already-deleted cached ids (18, 26) in refreshIds -> returned, no 409; cascade continues over a partially deleted subtree"
+          expect: "nodes [4,10,18,26] all deleted; DB deleted = {4,10,11,18,19,26,27}"
+        - name: Stale_cache_changes_under_ancestor_deleted_by_another_client_are_409_and_persist_nothing
+          covers: "V6, V7: other client's apply deletes 4; stale edit of 26 + temp chain under 18 + valid edit/add elsewhere"
+          expect: "409, title Conflict, nodeIds [18,26]; DB 30 rows, node 2 'Books', node 26 'Ultrabook 13-inch'"
+        - name: Stale_delete_of_node_already_cascade_deleted_by_another_client_succeeds
+          covers: "V6: delete of a node already cascade-deleted elsewhere is idempotent and the rest of the batch applies"
+          expect: "200; idMap tmp-1=31; nodes [2,26,31]; 26 deleted; 2 'Books2'"
+        - name: Real_ids_from_idMap_are_used_by_the_next_apply
+          covers: "V8: resync — real ids from idMap used for edit, add-under and delete in following applies"
+          expect: "31,32 then 33 with ancestorIds [3,9,17,25,30,31,32]; delete 31 -> 31,32,33 deleted, 30 live"
+        - name: Fifty_level_temp_chain_sent_deepest_first
+          covers: "V3: arbitrary depth of temp chains, reverse order, ancestor CTE at depth 54"
+          expect: "tmp-i = 31+i; node 80 parentId 79, 54 ancestorIds starting [3,9,17,25,30,31], last 79"
+        - name: RefreshIds_at_the_10000_limit_is_accepted
+          covers: "V1 limit boundary (10001 -> 400 is already covered)"
+          expect: "200; 30 nodes, 14 deleted"
+    - path: backend/tests/TreeEditor.Api.Tests/Apply/ApplyAtomicityTests.cs
+      cases:
+        - name: Rolled_back_adds_leave_a_sequence_gap
+          covers: "V9 / stage-3 open risk 4: 500 after id allocation rolls back rows, not the sequence"
+          expect: "500; next add gets 33; DB 31 rows; ids 31, 32 absent"
+        - name: Validation_not_found_and_conflict_failures_consume_no_ids
+          covers: "V9: 400/404/409 consume no ids"
+          expect: "409, 404, 400, then next add gets 31"
+  already_covered:   # do not duplicate
+    - "Cascade to never-loaded descendants — ApplyCascadeTests.Delete_cascades_to_never_loaded_descendants"
+    - "refreshIds show cascade of live cached descendants — ApplyCascadeTests.RefreshIds_show_cascade"
+    - "Same-batch add/edit under a node deleted in the batch — ApplyCascadeTests.Same_batch_add_under_node_deleted_in_batch_is_deleted, Same_batch_edit_of_descendant_of_deleted_node"
+    - "Idempotent / duplicate deletes — ApplyCascadeTests.Redelete_is_idempotent, Duplicate_delete_ids_are_deduplicated"
+    - "2–3 level temp chains, breadth-first ids — ApplyHappyPathTests.Temp_id_chain_with_reversed_request_order, Three_level_chain_plus_sibling_uses_breadth_first_ids"
+    - "Mixed batch of unrelated nodes — ApplyHappyPathTests.Mixed_batch_persists, Response_contains_all_referenced_ids_deduplicated_and_ordered"
+    - "409 on directly deleted node / parent; 404 precedence; nothing persisted on 409 — ApplyErrorTests"
+    - "Rollback on a late DB failure — ApplyAtomicityTests.Failure_in_later_operation_rolls_everything_back"
+    - "Parallel add vs ancestor cascade, advisory lock — ApplyConcurrencyTests"
+    - "Sequence restarts at 31 after Reset — ResetTests.Reset_removes_added_rows_and_restarts_identity_at_31, Reset_after_apply_restores_seed_and_sequence"
+  must_pass_command: "cd backend && dotnet test TreeEditor.sln"
+
+# ---------------------------------------------------------------------------
+readme_backend_outline:
+  order_note: Backend sections in this order; frontend sections (cache UI behaviour, frontend tests, styling) are inserted by the frontend plan.
+  sections:
+    - heading: "## Quick start"
+      content:
+        - "First bash block is exactly one line: `docker compose up --build`."
+        - "Keep the services table (UI http://localhost:3000, API http://localhost:8080 also via http://localhost:3000/api, PostgreSQL localhost:5432 db treeeditor / user tree / password tree)."
+        - "One sentence: on first start the API applies the EF migration and seeds the sample tree automatically (retrying until the DB is ready); the Reset button (POST /api/reset) restores it at any time."
+        - "Keep the DB_PORT / API_PORT / UI_PORT override sentence."
+    - heading: "## Tests"
+      content:
+        - "Keep the backend command `cd backend && dotnet test TreeEditor.sln` and the Docker/Testcontainers sentence."
+        - "Add one sentence: integration tests cover reads, Reset, every Apply rule (validation, 404/409, cascade, atomic rollback, concurrency) and the stage-4 cache flows (client-shaped batches, stale cache 409, id mapping across applies)."
+    - heading: "## API"
+      content:
+        - Keep the endpoint table and the contract link.
+        - "Apply paragraph: keep it; add: order inside the transaction is adds (parents first) -> edits -> cascade deletes, so an edit/add under a node deleted in the same batch ends deleted."
+        - "Add: the cache sends every real id it holds in `refreshIds`, so cascaded deletes of cached descendants come back in the same response (the server never enumerates whole subtrees)."
+        - "Add: 409 means the cache is stale (another client deleted the node or an ancestor); nothing is persisted and `nodeIds` lists the offending ids; pending changes stay in the cache."
+    - heading: "## Database schema"
+      content:
+        - "Keep the nodes table (id bigint identity by default, parent_id nullable FK fk_nodes_parent ON DELETE RESTRICT, value varchar(200) with ck_nodes_value_length 1..200 chars, is_deleted boolean)."
+        - "Keep: ck_nodes_parent_not_self; index ix_nodes_parent_id_id on (parent_id, id) for lazy children ordered by id; trigger trg_nodes_parent_immutable (function nodes_parent_immutable) rejecting parent changes."
+        - "Add subsection `### Writes and consistency`: Apply, Reset and the startup seed take the transaction-scoped advisory lock `pg_advisory_xact_lock(4242)` as their first statement, so tree writes are serialized; Apply also locks referenced rows with `SELECT ... FOR UPDATE`. Invariant: no live node has a deleted parent — check with `SELECT count(*) FROM nodes c JOIN nodes p ON p.id = c.parent_id WHERE p.is_deleted AND NOT c.is_deleted` (always 0)."
+    - heading: "### Tree model"
+      content:
+        - "Keep the adjacency-list rationale; replace '(and, from stage 3, subtree soft-delete)' by 'and subtree soft-delete'."
+        - "Add: adds under new (temp) nodes need only the parent's freshly allocated id, which is why adjacency list beats materialized path / closure table / nested sets here."
+    - heading: "### Seed"
+      content:
+        - Keep as is (3 roots, 30 nodes, 5 levels, ids 1..30, SeedData.cs).
+    - heading: "## Key decisions"
+      content_backend_bullets:
+        - "Soft delete with cascade (drop the 'Implemented by Apply (stage 3)' suffix)."
+        - Immutable parent (trigger) -> stable ancestry for cache hierarchy assembly.
+        - "Atomic Apply: one transaction, validation before any DB access, precedence 400 -> 404 -> 409, nothing persisted on any error."
+        - "Set-based raw SQL for Apply (fixed number of round trips per batch; recursive CTEs for cascade and ancestors), EF Core for schema/migrations and simple reads."
+        - "Serialized writes via advisory lock 4242 (Apply, Reset, seed)."
+        - Reset semantics (keep existing bullet) and fixed seed ids (keep).
+        - Same-origin /api proxy, no CORS (keep).
+    - heading: "## Known behaviour"
+      known_behaviour:
+        text: |
+          - Ids are never reused: an apply that fails after new ids were drawn (for example a database error, HTTP 500) rolls back its rows but not the id sequence, so later nodes skip those ids. Validation (400), not-found (404) and conflict (409) failures are detected before ids are drawn and leave no gap. Clients always use the `idMap` from the Apply response and never predict ids.
+          - Reset restarts ids at 31, so ids are reused only across a Reset. Another open browser tab must reload its cache after a Reset made elsewhere.
+          - One Apply accepts at most 1000 edits, 1000 adds and 1000 deletes, and at most 10000 `refreshIds`; larger requests get 400.
+
+backend_claude_md_points:   # appended to backend/CLAUDE.md "## Conventions" by docs-and-tests (step 5)
+  - "Stage 4 made no production backend change. Stage-4 client-flow tests live in tests/TreeEditor.Api.Tests/Apply/ApplyClientFlowTests.cs (requests shaped per api-contract client_rules); see test_matrix in docs/plans/stage-4-backend.yaml."
+  - "Ids: identity sequence; 400/404/409 consume no ids (nextval runs after the 404/409 checks); a 500 after allocation leaves a sequence gap (tested in ApplyAtomicityTests); ids are reused only across Reset (restart at 31)."
+
+claude_md_decision_line_optional: "Ids: identity sequence, never reused except across Reset; 400/404/409 consume no ids, a 500 after allocation leaves a gap (accepted) — docs/plans/stage-4-backend.md#decision-record-2--sequence-gaps-are-accepted-stage-3-open-risk-4"
+tree_storage_summary: "Tree storage: adjacency list (nodes.parent_id, immutable via trigger) + recursive CTEs for ancestors / subtree soft-delete; index (parent_id, id) — unchanged in stage 4 (stage-2 DR1)"
+
+# ---------------------------------------------------------------------------
+acceptance_criteria:
+  - id: AC1
+    check: "cd backend && dotnet build TreeEditor.sln -c Release --no-incremental"
+    expect: "Build succeeded. 0 Warning(s) 0 Error(s)"
+  - id: AC2
+    check: "cd backend && dotnet test TreeEditor.sln"
+    expect: "Failed: 0; total = stage-3 total + 9"
+  - id: AC3
+    check: "cd backend && dotnet test TreeEditor.sln --filter \"FullyQualifiedName~ApplyClientFlowTests|FullyQualifiedName~ApplyAtomicityTests\""
+    expect: "Passed: 10, Failed: 0"
+  - id: AC4
+    check: "git status --porcelain -- backend/src (from repo root, before the stage-4 commits)"
+    expect: "no output (production code unchanged)"
+  - id: AC5
+    check: "docker compose up --build -d (repo root, no *_PORT set); wait until `curl -s http://localhost:8080/api/health` returns {\"status\":\"ok\"} (max 90 s); then run `smoke` in order"
+    expect: "every smoke command returns its expected result"
+  - id: AC6
+    check: "README.md checks from step 4 done_when"
+    expect: "all hold"
+
+smoke:
+  preconditions: "AC5 stack running; run from repo root in zsh; sequential, in this order"
+  commands:
+    - id: S1
+      run: curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/api/reset
+      expect_body: "200"
+    - id: S2
+      title: another client deletes 4 (cascade reaches 18 and 26)
+      run: "curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/api/nodes/apply -H 'Content-Type: application/json' -d '{\"edits\":[],\"adds\":[],\"deletes\":[4]}'"
+      expect_body: "200"
+    - id: S3
+      title: stale cache edits 26 and adds a temp chain under 18 -> 409
+      run: "curl -s -i -X POST http://localhost:8080/api/nodes/apply -H 'Content-Type: application/json' -d '{\"edits\":[{\"id\":26,\"value\":\"x\"},{\"id\":2,\"value\":\"Books2\"}],\"adds\":[{\"tempId\":\"tmp-1\",\"parentId\":18,\"value\":\"A\"},{\"tempId\":\"tmp-2\",\"parentTempId\":\"tmp-1\",\"value\":\"B\"}],\"deletes\":[],\"refreshIds\":[2,18,26]}'"
+      expect: 'status line "HTTP/1.1 409 Conflict"; body contains "nodeIds":[18,26]'
+    - id: S4
+      title: nothing persisted, no id consumed
+      run: "docker compose exec -T db psql -U tree -d treeeditor -At -c \"SELECT count(*), max(id), (SELECT value FROM nodes WHERE id = 2) FROM nodes\""
+      expect_body: "30|30|Books"
+    - id: S5
+      title: client-shaped batch after reloading (stale edits/adds dropped by the client), refresh shows cascade
+      run: "curl -s -X POST http://localhost:8080/api/nodes/apply -H 'Content-Type: application/json' -d '{\"edits\":[{\"id\":2,\"value\":\"Books2\"}],\"adds\":[{\"tempId\":\"tmp-3\",\"parentId\":3,\"value\":\"After conflict\"}],\"deletes\":[],\"refreshIds\":[2,18,26]}'"
+      expect_body: '{"idMap":{"tmp-3":31},"nodes":[{"id":2,"parentId":null,"value":"Books2","isDeleted":false,"hasChildren":true,"ancestorIds":[]},{"id":18,"parentId":10,"value":"Ultrabooks","isDeleted":true,"hasChildren":true,"ancestorIds":[1,4,10]},{"id":26,"parentId":18,"value":"Ultrabook 13-inch","isDeleted":true,"hasChildren":false,"ancestorIds":[1,4,10,18]},{"id":31,"parentId":3,"value":"After conflict","isDeleted":false,"hasChildren":false,"ancestorIds":[3]}]}'
+    - id: S6
+      run: "docker compose exec -T db psql -U tree -d treeeditor -At -c \"SELECT count(*) FROM nodes c JOIN nodes p ON p.id = c.parent_id WHERE p.is_deleted AND NOT c.is_deleted\""
+      expect_body: "0"
+    - id: S7
+      run: curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/api/reset
+      expect_body: "200 (leaves the stack at the seed)"
+  notes:
+    - Error bodies contain a non-deterministic traceId; that is why S3 uses "contains".
+
+contract_changes_requested: []
+
+open_questions: []
