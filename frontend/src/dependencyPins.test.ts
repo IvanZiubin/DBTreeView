@@ -1,38 +1,37 @@
-// Guards the stage-3 PrimeVue styling fix (docs/plans/stage-3-frontend.yaml fix_ui_theme; DR-FE-4.9).
+// Guards the stage-5 dependency decision (docs/plans/stage-5-frontend.md DR-FE-5.1, DR-FE-5.3): PrimeVue is removed
+// completely and icons come only from lucide-vue-next, pinned exactly. Replaces the stage-4 PrimeVue pin guard (DR-FE-4.9).
 // `?raw` imports are typed by vite/client (src/vite-env.d.ts) and inlined by Vitest; no JSON-module typing needed.
 import { describe, expect, it } from 'vitest'
 import packageJsonText from '../package.json?raw'
-import installedStylesPackageJsonText from '../node_modules/@primeuix/styles/package.json?raw'
-import installedButtonStyleText from '../node_modules/@primeuix/styles/button/index.mjs?raw'
 
 interface PackageJson {
-  version?: string
   dependencies?: Record<string, string>
+  devDependencies?: Record<string, string>
   overrides?: Record<string, string>
 }
 
-const PIN_MESSAGE =
-  'primevue 4.3.3 and @primeuix/themes 1.0.3 use the @primeuix/styled 0.5 engine, which only understands the CSS ' +
-  'of @primeuix/styles 1.0.x (newer styles emit dt() calls and the UI renders unstyled). Keep primevue 4.3.3, ' +
-  '@primeuix/themes 1.0.3 and @primeuix/styles 1.0.3 (in dependencies AND overrides) together; change them only ' +
-  'together, in one planned upgrade, and re-check the UI in a browser.'
+const REMOVED_PACKAGES = ['primevue', '@primeuix/themes', '@primeuix/styles', '@primeuix/styled', 'primeicons']
+
+const MESSAGE =
+  'Stage 5 removed PrimeVue (DR-FE-5.1): the UI is plain Vue on src/styles/industry.css + src/styles/app.css and ' +
+  'icons come from lucide-vue-next 0.525.0 (exact). Do not re-add PrimeVue packages or an overrides block; change ' +
+  'the icon package only via a plan.'
 
 const pkg = JSON.parse(packageJsonText) as PackageJson
-const installedStyles = JSON.parse(installedStylesPackageJsonText) as PackageJson
 
-describe('PrimeVue styling pin', () => {
-  it('dependencies pin primevue 4.3.3 with @primeuix/themes 1.0.3 and @primeuix/styles 1.0.3', () => {
-    expect(pkg.dependencies?.primevue, PIN_MESSAGE).toBe('4.3.3')
-    expect(pkg.dependencies?.['@primeuix/themes'], PIN_MESSAGE).toBe('1.0.3')
-    expect(pkg.dependencies?.['@primeuix/styles'], PIN_MESSAGE).toBe('1.0.3')
+describe('dependency pins', () => {
+  it('no PrimeVue package in dependencies or devDependencies', () => {
+    for (const name of REMOVED_PACKAGES) {
+      expect(pkg.dependencies?.[name], `${MESSAGE} (${name})`).toBeUndefined()
+      expect(pkg.devDependencies?.[name], `${MESSAGE} (${name})`).toBeUndefined()
+    }
   })
 
-  it('overrides force the same @primeuix/styles 1.0.3 for primevue', () => {
-    expect(pkg.overrides?.['@primeuix/styles'], PIN_MESSAGE).toBe('1.0.3')
+  it('no overrides block', () => {
+    expect(pkg.overrides, MESSAGE).toBeUndefined()
   })
 
-  it('the installed @primeuix/styles is 1.0.3 and its CSS has no dt() calls', () => {
-    expect(installedStyles.version, PIN_MESSAGE).toBe('1.0.3')
-    expect(installedButtonStyleText.includes("dt('"), PIN_MESSAGE).toBe(false)
+  it('lucide-vue-next is pinned exactly to 0.525.0', () => {
+    expect(pkg.dependencies?.['lucide-vue-next'], MESSAGE).toBe('0.525.0')
   })
 })

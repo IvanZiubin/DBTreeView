@@ -1,6 +1,5 @@
 // Pure hierarchy assembly for CachedTreeView (no Vue/Pinia imports). See docs/plans/stage-3-frontend.md DR-FE-3.1.
-import type { TreeNode } from 'primevue/treenode'
-import { cacheKey, type CacheId, type CachedNode, type CacheTreeNodeData } from './model'
+import { cacheKey, type CacheId, type CachedNode, type CacheTreeNode, type CacheTreeNodeData } from './model'
 
 const TEMP_ID_PATTERN = /^tmp-(\d+)$/
 
@@ -49,11 +48,11 @@ export function placeNode(node: CachedNode, isCached: (key: string) => boolean):
 }
 
 /**
- * Assembles cached nodes (any order, any gaps) into PrimeVue TreeNodes. Each node is displayed under its
+ * Assembles cached nodes (any order, any gaps) into CacheTreeNodes. Each node is displayed under its
  * nearest cached ancestor; nodes without a cached ancestor are top-level. Siblings sorted by compareCacheIds.
  * TreeNode: { key: cacheKey(id), label: value, leaf: no displayed children, children, data: CacheTreeNodeData }.
  */
-export function buildCacheTree(nodes: readonly CachedNode[]): TreeNode[] {
+export function buildCacheTree(nodes: readonly CachedNode[]): CacheTreeNode[] {
   const cachedKeys = new Set<string>()
   for (const node of nodes) {
     cachedKeys.add(cacheKey(node.id))
@@ -75,9 +74,9 @@ export function buildCacheTree(nodes: readonly CachedNode[]): TreeNode[] {
 
   const visited = new Set<string>()
 
-  function build(parentKey: string | null): TreeNode[] {
+  function build(parentKey: string | null): CacheTreeNode[] {
     const group = (childrenByParent.get(parentKey) ?? []).slice().sort((a, b) => compareCacheIds(a.id, b.id))
-    const result: TreeNode[] = []
+    const result: CacheTreeNode[] = []
     for (const node of group) {
       const key = cacheKey(node.id)
       if (visited.has(key)) {
@@ -101,4 +100,32 @@ export function buildCacheTree(nodes: readonly CachedNode[]): TreeNode[] {
 export function gapTooltip(missingAncestorIds: readonly CacheId[]): string {
   const ids = missingAncestorIds.map((id) => `#${id}`).join(', ')
   return `${missingAncestorIds.length} level(s) not loaded: ${ids}`
+}
+
+/**
+ * Keys of cached nodes that move under `loadedId` when it is inserted into the cache (gutter "n re-parented" and the
+ * re-parented flash, DR-FE-5.7): nodes whose ancestorIds contain loadedId with no cached ancestor between loadedId and
+ * themselves. Empty when loadedId is already cached (a reload never re-parents). Sorted by compareCacheIds.
+ */
+export function reparentedKeys(nodes: readonly CachedNode[], loadedId: CacheId): string[] {
+  const loadedKey = cacheKey(loadedId)
+  const cachedKeys = new Set<string>()
+  for (const node of nodes) {
+    cachedKeys.add(cacheKey(node.id))
+  }
+  if (cachedKeys.has(loadedKey)) {
+    return []
+  }
+  const moved: CachedNode[] = []
+  for (const node of nodes) {
+    const index = node.ancestorIds.findIndex((ancestorId) => cacheKey(ancestorId) === loadedKey)
+    if (index < 0) {
+      continue
+    }
+    const between = node.ancestorIds.slice(index + 1)
+    if (between.every((ancestorId) => !cachedKeys.has(cacheKey(ancestorId)))) {
+      moved.push(node)
+    }
+  }
+  return moved.sort((a, b) => compareCacheIds(a.id, b.id)).map((node) => cacheKey(node.id))
 }

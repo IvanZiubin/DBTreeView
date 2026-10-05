@@ -30,7 +30,7 @@ export function cacheKey(id: CacheId): string {
   return String(id)
 }
 
-/** `data` of every PrimeVue TreeNode produced by buildCacheTree. */
+/** `data` of every CacheTreeNode produced by buildCacheTree. */
 export interface CacheTreeNodeData {
   node: CachedNode
   /**
@@ -39,4 +39,16 @@ export interface CacheTreeNodeData {
    * direct parent, or when the node is a DB root.
    */
   missingAncestorIds: CacheId[]
+}
+
+/** One assembled CachedTreeView node (replaces PrimeVue's TreeNode, DR-FE-5.1). */
+export interface CacheTreeNode {
+  /** cacheKey(id). */
+  key: string
+  /** Current value. */
+  label: string
+  /** No displayed children. */
+  leaf: boolean
+  children: CacheTreeNode[]
+  data: CacheTreeNodeData
 }

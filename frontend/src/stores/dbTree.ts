@@ -1,11 +1,11 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import type { TreeNode } from 'primevue/treenode'
+import type { DbTreeNode } from '../view/types'
 import { getChildren, getRoots } from '../api/client'
 import type { Node } from '../api/types'
 
-/** Maps an API node to a PrimeVue TreeNode. Children are loaded lazily. */
-export function toTreeNode(node: Node): TreeNode {
+/** Maps an API node to a DbTreeNode (DBTreeView row model). Children are loaded lazily. */
+export function toTreeNode(node: Node): DbTreeNode {
   return {
     key: String(node.id),
     label: node.value,
@@ -15,7 +15,7 @@ export function toTreeNode(node: Node): TreeNode {
   }
 }
 
-function findTreeNode(nodes: TreeNode[], key: string): TreeNode | null {
+function findTreeNode(nodes: DbTreeNode[], key: string): DbTreeNode | null {
   for (const node of nodes) {
     if (node.key === key) {
       return node
@@ -31,7 +31,7 @@ function findTreeNode(nodes: TreeNode[], key: string): TreeNode | null {
 }
 
 export const useDbTreeStore = defineStore('dbTree', () => {
-  const roots = ref<TreeNode[]>([])
+  const roots = ref<DbTreeNode[]>([])
   const rootsLoading = ref(false)
   const expandedKeys = ref<Record<string, boolean>>({})
   const selectionKeys = ref<Record<string, boolean>>({})

@@ -1,10 +1,9 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import type { TreeNode } from 'primevue/treenode'
 import { applyChanges } from '../api/client'
 import type { NodeDetails } from '../api/types'
 import { buildCacheTree } from '../cache/hierarchy'
-import { cacheKey, type CacheId, type CachedNode } from '../cache/model'
+import { cacheKey, type CacheId, type CachedNode, type CacheTreeNode } from '../cache/model'
 import {
   buildApplyPlan,
   canModify,
@@ -24,14 +23,16 @@ export const useCacheStore = defineStore('cache', () => {
   /** All cached nodes keyed by cacheKey(id). Flat: the hierarchy is derived in treeNodes, never stored. */
   const nodes = ref<Record<string, CachedNode>>({})
   const selectedKey = ref<string | null>(null)
-  /** PrimeVue Tree expandedKeys. New nodes start expanded; user collapse removes keys. Always replaced, never mutated. */
+  /** Expanded cache row keys. New nodes start expanded; user collapse removes keys. Always replaced, never mutated. */
   const expandedKeys = ref<Record<string, boolean>>({})
   /** Next temp id is `tmp-${nextTempSeq}`; only increases; reset by clear(). */
   const nextTempSeq = ref(1)
   /** True while POST /api/nodes/apply is in flight; edit/add/delete are rejected meanwhile. */
   const applying = ref(false)
-  /** Incremented by clear(); callers discard responses that started in an older epoch (Reset race). */
+  /** Incremented by clear(); callers discard responses that started in an older epoch (Reset / Clear cache race). */
   const epoch = ref(0)
+  /** idMap of the last successful apply (tempId -> real id); used for the "saved #id" flash. Reset by clear(). */
+  const lastIdMap = ref<Record<string, number>>({})
 
   const nodeList = computed<CachedNode[]>(() => Object.values(nodes.value))
 
@@ -60,7 +61,7 @@ export const useCacheStore = defineStore('cache', () => {
   )
 
   /** Hierarchy assembled from cached nodes: nearest cached ancestor (src/cache/hierarchy.ts). */
-  const treeNodes = computed<TreeNode[]>(() => buildCacheTree(nodeList.value))
+  const treeNodes = computed<CacheTreeNode[]>(() => buildCacheTree(nodeList.value))
 
   function expandKeys(keys: readonly string[]): void {
     const next: Record<string, boolean> = { ...expandedKeys.value }
@@ -208,6 +209,7 @@ export const useCacheStore = defineStore('cache', () => {
       selectedKey.value = rekeySelection(selectedKey.value, response.idMap, plan.droppedTempKeys)
       expandedKeys.value = rekeyExpanded(expandedKeys.value, response.idMap, plan.droppedTempKeys)
       mergeServerNodes(response.nodes)
+      lastIdMap.value = { ...response.idMap }
       return plan
     } finally {
       if (startedEpoch === epoch.value) {
@@ -216,9 +218,13 @@ export const useCacheStore = defineStore('cache', () => {
     }
   }
 
-  /** Empties the cache incl. pending changes (used by Reset) and starts a new epoch. */
+  /**
+   * Empties the cache incl. pending changes and temp ids and starts a new epoch. Client-only: no API call
+   * (used by Reset and by the Clear cache button, DR-FE-5.6).
+   */
   function clear(): void {
     nodes.value = {}
+    lastIdMap.value = {}
     selectedKey.value = null
     expandedKeys.value = {}
     nextTempSeq.value = 1
@@ -233,6 +239,7 @@ export const useCacheStore = defineStore('cache', () => {
     nextTempSeq,
     applying,
     epoch,
+    lastIdMap,
     nodeList,
     isEmpty,
     selectedNode,

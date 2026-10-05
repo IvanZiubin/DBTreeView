@@ -1,18 +1,23 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import Button from 'primevue/button'
-import Tree from 'primevue/tree'
-import type { TreeNode } from 'primevue/treenode'
-import NodeLabel from './NodeLabel.vue'
-import { getNode } from '../api/client'
-import type { Node } from '../api/types'
+import { computed, onMounted } from 'vue'
+import { ChevronRight, Download, LoaderCircle } from 'lucide-vue-next'
+import BlueprintCorners from './BlueprintCorners.vue'
+import StatusTags from './StatusTags.vue'
 import { reportError } from '../errors'
 import { useCacheStore } from '../stores/cache'
 import { useDbTreeStore } from '../stores/dbTree'
+import { useHighlightStore } from '../stores/highlight'
+import { useTransferStore } from '../stores/transfer'
+import { flattenDbTree, guideWidth, type DbRow } from '../view/treeRows'
 
 const dbTree = useDbTreeStore()
 const cache = useCacheStore()
-const loadingIntoCache = ref(false)
+const highlight = useHighlightStore()
+const transfer = useTransferStore()
+
+const rows = computed<DbRow[]>(() => flattenDbTree(dbTree.roots, dbTree.expandedKeys))
+const selectedKey = computed<string | null>(() => (dbTree.selectedId === null ? null : String(dbTree.selectedId)))
+const loadDisabled = computed<boolean>(() => dbTree.selectedNode === null || transfer.pendingLoad !== null)
 
 onMounted(async () => {
   try {
@@ -22,73 +27,150 @@ onMounted(async () => {
   }
 })
 
-async function onNodeExpand(node: TreeNode): Promise<void> {
-  try {
-    await dbTree.loadChildren(node.key)
-  } catch (err) {
-    reportError(err)
-  }
+function selectRow(key: string): void {
+  dbTree.selectionKeys = { [key]: true }
 }
 
-/** GET /api/nodes/{id} -> cache.loadNode. No success toast: the node is selected and revealed in the cache. */
-async function onLoadIntoCache(): Promise<void> {
-  const id = dbTree.selectedId
-  if (id === null) {
+/** Chevron: collapse, or expand and lazily fetch one level (GET /api/nodes/{id}/children, once per node). */
+async function toggleRow(row: DbRow): Promise<void> {
+  if (row.expanded) {
+    const next: Record<string, boolean> = { ...dbTree.expandedKeys }
+    delete next[row.key]
+    dbTree.expandedKeys = next
     return
   }
-  const startedEpoch = cache.epoch
-  loadingIntoCache.value = true
+  dbTree.expandedKeys = { ...dbTree.expandedKeys, [row.key]: true }
   try {
-    const details = await getNode(id)
-    if (startedEpoch !== cache.epoch) {
-      return
-    }
-    cache.loadNode(details)
+    await dbTree.loadChildren(row.key)
   } catch (err) {
     reportError(err)
-  } finally {
-    loadingIntoCache.value = false
   }
 }
 
-function nodeData(node: TreeNode): Node {
-  return node.data as Node
+/** Button, double-click and drop all use transfer.loadIntoCache, the single GET /api/nodes/{id} path (DR-FE-5.7). */
+function onLoadSelected(): void {
+  const node = dbTree.selectedNode
+  if (node === null) {
+    return
+  }
+  void transfer.loadIntoCache(node.id, node.value)
+}
+
+function onRowDoubleClick(row: DbRow): void {
+  selectRow(row.key)
+  void transfer.loadIntoCache(row.node.data.id, row.node.data.value)
+}
+
+function onDragStart(event: DragEvent, row: DbRow): void {
+  selectRow(row.key)
+  if (event.dataTransfer) {
+    event.dataTransfer.setData('text/plain', row.key)
+    event.dataTransfer.effectAllowed = 'copy'
+  }
+  transfer.startDrag(row.node.data.id, row.node.data.value)
+}
+
+function onDragEnd(): void {
+  transfer.endDrag()
+}
+
+function isCached(key: string): boolean {
+  return key in cache.nodes
 }
 </script>
 
 <template>
-  <section class="tree-panel" data-testid="db-tree-view">
-    <header class="tree-panel__header">
-      <h2 class="tree-panel__title">Database</h2>
-      <Button
-        label="Load into cache"
-        icon="pi pi-download"
-        size="small"
-        :disabled="dbTree.selectedId === null || loadingIntoCache"
-        :loading="loadingIntoCache"
+  <section class="panel blueprint" data-testid="db-tree-view" aria-labelledby="db-panel-title">
+    <BlueprintCorners />
+    <header class="panel__header">
+      <div class="panel__heading">
+        <span class="card-kicker panel__kicker">DBTreeView</span>
+        <h3 id="db-panel-title" class="panel__title">Database</h3>
+      </div>
+      <button
+        type="button"
+        class="btn btn-primary btn-sm blueprint"
+        :disabled="loadDisabled"
         data-testid="load-into-cache"
-        @click="onLoadIntoCache"
-      />
-    </header>
-    <div class="tree-panel__body">
-      <Tree
-        v-model:selection-keys="dbTree.selectionKeys"
-        v-model:expanded-keys="dbTree.expandedKeys"
-        :value="dbTree.roots"
-        selection-mode="single"
-        :meta-key-selection="false"
-        loading-mode="icon"
-        :loading="dbTree.rootsLoading"
-        class="tree-panel__tree"
-        @node-expand="onNodeExpand"
+        @click="onLoadSelected"
       >
-        <template #default="{ node }">
-          <NodeLabel :value="nodeData(node).value" :status="nodeData(node).isDeleted ? 'deleted' : 'clean'" />
-        </template>
-      </Tree>
-      <p v-if="!dbTree.rootsLoading && dbTree.roots.length === 0" class="tree-panel__empty">
-        No nodes in the database.
-      </p>
+        <BlueprintCorners />
+        <LoaderCircle v-if="transfer.pendingLoad !== null" class="spin" :size="14" :stroke-width="1.5" />
+        <Download v-else :size="14" :stroke-width="1.5" />
+        Load into cache
+      </button>
+    </header>
+    <div class="panel__body" data-testid="db-tree-body">
+      <div v-if="dbTree.rootsLoading && rows.length === 0" class="panel__loading" data-testid="db-roots-loading">
+        <LoaderCircle class="spin" :size="14" :stroke-width="1.5" />
+        Loading roots
+        <span class="mono-hint">GET /api/nodes/roots</span>
+      </div>
+      <div v-if="rows.length > 0" class="tree" role="tree" aria-label="Database tree" data-testid="db-tree">
+        <div
+          v-for="row in rows"
+          :key="row.key"
+          class="tree-row"
+          :class="{
+            'is-selected': selectedKey === row.key,
+            'is-linked': highlight.isLinked('db', row.key),
+            'is-flash': highlight.isFlashing('db', row.key),
+            'is-struck': row.node.data.isDeleted,
+          }"
+          role="treeitem"
+          tabindex="0"
+          draggable="true"
+          :aria-level="row.depth + 1"
+          :aria-selected="selectedKey === row.key"
+          :aria-expanded="row.hasToggle ? row.expanded : undefined"
+          :data-db-row="row.key"
+          :data-testid="`db-node-${row.key}`"
+          @click="selectRow(row.key)"
+          @dblclick="onRowDoubleClick(row)"
+          @keydown.enter.self.prevent="selectRow(row.key)"
+          @keydown.space.self.prevent="selectRow(row.key)"
+          @mouseenter="highlight.setHover('db', row.key)"
+          @mouseleave="highlight.clearHover()"
+          @dragstart="onDragStart($event, row)"
+          @dragend="onDragEnd"
+        >
+          <span class="tree-row__guides" :style="{ width: guideWidth(row.depth) }"></span>
+          <button
+            v-if="row.hasToggle"
+            type="button"
+            class="tree-row__toggle"
+            :aria-label="row.expanded ? 'Collapse' : 'Expand'"
+            @click.stop="toggleRow(row)"
+            @dblclick.stop
+          >
+            <LoaderCircle v-if="row.loading" class="tree-row__spinner spin" :size="13" :stroke-width="1.5" />
+            <ChevronRight
+              v-else
+              class="tree-row__chevron"
+              :class="{ 'is-open': row.expanded }"
+              :size="14"
+              :stroke-width="1.5"
+            />
+          </button>
+          <span v-else class="tree-row__leaf" aria-hidden="true"><span class="tree-row__leaf-dot"></span></span>
+          <span
+            class="tree-row__value"
+            data-val
+            data-testid="node-label"
+            :data-status="row.node.data.isDeleted ? 'deleted' : 'clean'"
+          >{{ row.node.data.value }}</span>
+          <StatusTags :status="row.node.data.isDeleted ? 'deleted' : 'clean'" :flash="null" />
+          <span class="tree-row__spacer"></span>
+          <span class="tree-row__id">#{{ row.node.data.id }}</span>
+          <span
+            v-if="isCached(row.key)"
+            class="tree-row__cached"
+            title="In cache"
+            data-testid="db-cached-marker"
+          ></span>
+        </div>
+      </div>
+      <p v-if="!dbTree.rootsLoading && dbTree.roots.length === 0" class="panel__empty">No nodes in the database.</p>
     </div>
   </section>
 </template>

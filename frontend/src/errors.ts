@@ -1,13 +1,16 @@
-import type { useToast } from 'primevue/usetoast'
 import { ApiError } from './api/client'
+import type { ToastInput } from './stores/toasts'
 
-type ToastApi = ReturnType<typeof useToast>
+/** Error toasts stay longer than the 3.2 s default. */
+export const ERROR_TOAST_LIFE_MS = 6000
 
-let toastApi: ToastApi | null = null
+type ShowToast = (toast: ToastInput) => void
 
-/** Called once from App.vue setup with useToast(). */
-export function installErrorToast(toast: ToastApi): void {
-  toastApi = toast
+let showToast: ShowToast | null = null
+
+/** Called once from App.vue setup with the toast store's show(). */
+export function installErrorToast(show: ShowToast): void {
+  showToast = show
 }
 
 export function describeError(err: unknown): { summary: string; detail: string } {
@@ -24,5 +27,5 @@ export function describeError(err: unknown): { summary: string; detail: string }
 export function reportError(err: unknown): void {
   console.error(err)
   const { summary, detail } = describeError(err)
-  toastApi?.add({ severity: 'error', summary, detail, life: 6000 })
+  showToast?.({ severity: 'error', summary, detail, lifeMs: ERROR_TOAST_LIFE_MS })
 }

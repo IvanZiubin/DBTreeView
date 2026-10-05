@@ -1,38 +1,34 @@
 <script setup lang="ts">
-import ConfirmDialog from 'primevue/confirmdialog'
-import Toast from 'primevue/toast'
-import { useToast } from 'primevue/usetoast'
+import { ref } from 'vue'
 import AppHeader from './components/AppHeader.vue'
 import CachedTreeView from './components/CachedTreeView.vue'
 import DbTreeView from './components/DbTreeView.vue'
+import LinkLines from './components/LinkLines.vue'
+import NetworkLog from './components/NetworkLog.vue'
+import ToastStack from './components/ToastStack.vue'
+import TransferGutter from './components/TransferGutter.vue'
 import { installErrorToast } from './errors'
+import { useToastStore } from './stores/toasts'
 
-installErrorToast(useToast())
+const toasts = useToastStore()
+installErrorToast((toast) => {
+  toasts.show(toast)
+})
+
+/** The workspace grid; LinkLines measures rows relative to it. */
+const workspaceEl = ref<HTMLElement | null>(null)
 </script>
 
 <template>
-  <Toast position="top-right" />
-  <ConfirmDialog />
-  <AppHeader />
-  <main class="app-main">
-    <DbTreeView />
-    <CachedTreeView />
-  </main>
+  <div class="app-shell">
+    <AppHeader />
+    <main ref="workspaceEl" class="workspace" data-testid="workspace">
+      <DbTreeView />
+      <TransferGutter />
+      <CachedTreeView />
+      <LinkLines :container="workspaceEl" />
+    </main>
+    <NetworkLog />
+    <ToastStack />
+  </div>
 </template>
-
-<style scoped>
-.app-main {
-  flex: 1;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 1rem;
-  padding: 1rem;
-  min-height: 0;
-}
-
-@media (max-width: 900px) {
-  .app-main {
-    grid-template-columns: 1fr;
-  }
-}
-</style>
