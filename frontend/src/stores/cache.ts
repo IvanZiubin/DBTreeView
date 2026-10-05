@@ -1,9 +1,20 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type { TreeNode } from 'primevue/treenode'
+import { applyChanges } from '../api/client'
 import type { NodeDetails } from '../api/types'
 import { buildCacheTree } from '../cache/hierarchy'
 import { cacheKey, type CacheId, type CachedNode } from '../cache/model'
+import {
+  buildApplyPlan,
+  canModify,
+  propagateDeletes,
+  rekeyExpanded,
+  rekeySelection,
+  settleApplied,
+  validateValue,
+  type ApplyPlan,
+} from '../cache/pending'
 
 // Re-exported so components keep importing cache types from the store module.
 export { cacheKey }
@@ -15,9 +26,11 @@ export const useCacheStore = defineStore('cache', () => {
   const selectedKey = ref<string | null>(null)
   /** PrimeVue Tree expandedKeys. New nodes start expanded; user collapse removes keys. Always replaced, never mutated. */
   const expandedKeys = ref<Record<string, boolean>>({})
+  /** Next temp id is `tmp-${nextTempSeq}`; only increases; reset by clear(). */
   const nextTempSeq = ref(1)
+  /** True while POST /api/nodes/apply is in flight; edit/add/delete are rejected meanwhile. */
   const applying = ref(false)
-  /** Incremented by clear(); callers discard getNode responses that started in an older epoch (Reset race). */
+  /** Incremented by clear(); callers discard responses that started in an older epoch (Reset race). */
   const epoch = ref(0)
 
   const nodeList = computed<CachedNode[]>(() => Object.values(nodes.value))
@@ -28,11 +41,20 @@ export const useCacheStore = defineStore('cache', () => {
     selectedKey.value === null ? null : (nodes.value[selectedKey.value] ?? null),
   )
 
-  const hasPendingChanges = computed<boolean>(() =>
-    nodeList.value.some((n) => n.isNew || n.isEdited || n.isPendingDelete),
+  /** Number of nodes carrying any pending flag (new, edited, pending delete). Shown as the Apply badge. */
+  const pendingCount = computed<number>(
+    () => nodeList.value.filter((n) => n.isNew || n.isEdited || n.isPendingDelete).length,
   )
 
-  /** Every real (numeric) id in the cache, ascending. Stage 4 apply sends this as refreshIds (contract v2). */
+  const hasPendingChanges = computed<boolean>(() => pendingCount.value > 0)
+
+  /** Edit / Add child / Delete enabled: a selected node that is not effectively deleted, no apply in flight. */
+  const canModifySelected = computed<boolean>(() => {
+    const node = selectedNode.value
+    return node !== null && !applying.value && canModify(node, nodes.value)
+  })
+
+  /** Every real (numeric) id in the cache, ascending. Apply sends this as refreshIds (client_rules.refresh_ids). */
   const realIds = computed<number[]>(() =>
     nodeList.value.flatMap((n) => (typeof n.id === 'number' ? [n.id] : [])).sort((a, b) => a - b),
   )
@@ -51,7 +73,8 @@ export const useCacheStore = defineStore('cache', () => {
   /**
    * Inserts unknown nodes, refreshes known ones. Refresh overwrites only server fields (parentId, ancestorIds,
    * originalValue, isDeleted, hasChildren) and value only when not isEdited; isNew/isEdited/isPendingDelete are
-   * never touched. Newly inserted nodes are added to expandedKeys. Used by loadNode and by stage-4 apply.
+   * never touched here. Newly inserted nodes are added to expandedKeys. Ends with propagateDeletes over the
+   * whole cache (client_rules.pending_delete_propagation, DR-FE-4.2). Used by loadNode and apply.
    */
   function mergeServerNodes(serverNodes: readonly NodeDetails[]): void {
     const inserted: string[] = []
@@ -83,6 +106,7 @@ export const useCacheStore = defineStore('cache', () => {
         inserted.push(key)
       }
     }
+    propagateDeletes(nodes.value)
     if (inserted.length > 0) {
       expandKeys(inserted)
     }
@@ -100,34 +124,99 @@ export const useCacheStore = defineStore('cache', () => {
     selectedKey.value = cacheKey(details.id)
   }
 
-  /** TODO stage 4: change value of a non-deleted node; mark isEdited. */
-  function editValue(_id: CacheId, _value: string): void {
-    // Intentionally empty until stage 4.
+  /**
+   * Sets the trimmed value (DR-FE-4.4). Real node: isEdited = value differs from originalValue. Temp node: value
+   * only. Returns false (no change) for unknown / effectively deleted nodes, invalid values, or during apply.
+   */
+  function editValue(id: CacheId, value: string): boolean {
+    const node = nodes.value[cacheKey(id)]
+    if (!node || applying.value || !canModify(node, nodes.value) || validateValue(value) !== null) {
+      return false
+    }
+    const trimmed = value.trim()
+    node.value = trimmed
+    if (!node.isNew) {
+      node.isEdited = trimmed !== node.originalValue
+    }
+    return true
   }
 
   /**
-   * TODO stage 4: add a child with temp id `tmp-${nextTempSeq}` under a non-deleted node;
-   * ancestorIds = [...parent.ancestorIds, parent.id]; expand parent and new key via expandKeys.
+   * Adds a temp child `tmp-<n>` under a cached node (DR-FE-4.3); expands parent and child; selects the child.
+   * Returns the new key, or null (no change) for unknown / effectively deleted parents, invalid values, or during apply.
    */
-  function addChild(_parentId: CacheId, _value: string): void {
-    // Intentionally empty until stage 4.
-  }
-
-  /** TODO stage 4: mark the node and all cached descendants (ancestorIds contains id) as pending-deleted. */
-  function deleteNode(_id: CacheId): void {
-    // Intentionally empty until stage 4.
+  function addChild(parentId: CacheId, value: string): string | null {
+    const parent = nodes.value[cacheKey(parentId)]
+    if (!parent || applying.value || !canModify(parent, nodes.value) || validateValue(value) !== null) {
+      return null
+    }
+    let tempId = `tmp-${nextTempSeq.value}`
+    while (tempId in nodes.value) {
+      nextTempSeq.value += 1
+      tempId = `tmp-${nextTempSeq.value}`
+    }
+    nextTempSeq.value += 1
+    nodes.value[tempId] = {
+      id: tempId,
+      parentId: parent.id,
+      value: value.trim(),
+      originalValue: '',
+      isDeleted: false,
+      hasChildren: false,
+      isNew: true,
+      isEdited: false,
+      isPendingDelete: false,
+      ancestorIds: [...parent.ancestorIds, parent.id],
+    }
+    expandKeys([cacheKey(parent.id), tempId])
+    selectedKey.value = tempId
+    return tempId
   }
 
   /**
-   * TODO stage 4: build ApplyRequest with refreshIds = realIds.value, call applyChanges, re-key temp ids via
-   * idMap (also inside ancestorIds/parentId/selectedKey/expandedKeys), clear pending flags of applied nodes,
-   * then mergeServerNodes(response.nodes).
+   * Marks the node pending delete and cascades to every cached descendant, incl. temp nodes (propagateDeletes).
+   * Returns false (no change) for unknown / effectively deleted nodes or during apply.
    */
-  async function apply(): Promise<void> {
-    // Intentionally empty until stage 4.
+  function deleteNode(id: CacheId): boolean {
+    const node = nodes.value[cacheKey(id)]
+    if (!node || applying.value || !canModify(node, nodes.value)) {
+      return false
+    }
+    node.isPendingDelete = true
+    propagateDeletes(nodes.value)
+    return true
   }
 
-  /** Empties the cache (used by Reset) and starts a new epoch. */
+  /**
+   * Sends all pending changes in one POST /api/nodes/apply (DR-FE-4.6). Returns the applied plan on success, or
+   * null when nothing was done (no pending changes, already applying, or a Reset happened meanwhile).
+   * Throws the ApiError on failure; the cache is then left exactly as it was (client_rules.failure_handling).
+   */
+  async function apply(): Promise<ApplyPlan | null> {
+    if (applying.value || !hasPendingChanges.value) {
+      return null
+    }
+    const plan = buildApplyPlan(nodes.value)
+    const startedEpoch = epoch.value
+    applying.value = true
+    try {
+      const response = await applyChanges(plan.request)
+      if (startedEpoch !== epoch.value) {
+        return null
+      }
+      nodes.value = settleApplied(nodes.value, plan, response.idMap)
+      selectedKey.value = rekeySelection(selectedKey.value, response.idMap, plan.droppedTempKeys)
+      expandedKeys.value = rekeyExpanded(expandedKeys.value, response.idMap, plan.droppedTempKeys)
+      mergeServerNodes(response.nodes)
+      return plan
+    } finally {
+      if (startedEpoch === epoch.value) {
+        applying.value = false
+      }
+    }
+  }
+
+  /** Empties the cache incl. pending changes (used by Reset) and starts a new epoch. */
   function clear(): void {
     nodes.value = {}
     selectedKey.value = null
@@ -147,7 +236,9 @@ export const useCacheStore = defineStore('cache', () => {
     nodeList,
     isEmpty,
     selectedNode,
+    pendingCount,
     hasPendingChanges,
+    canModifySelected,
     realIds,
     treeNodes,
     mergeServerNodes,

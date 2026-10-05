@@ -100,6 +100,70 @@ export const useDbTreeStore = defineStore('dbTree', () => {
     }
   }
 
+  /**
+   * Re-fetches the roots and, level by level, the children of every previously loaded node; restores expansion
+   * and selection for nodes that still exist. Used after a successful Apply (DR-FE-4.8). Only levels the user
+   * had opened are fetched (stays lazy). A setRoots() meanwhile (Reset, another refresh) aborts it.
+   */
+  async function refresh(): Promise<void> {
+    const wasLoaded = Object.keys(loadedKeys.value).filter((key) => loadedKeys.value[key])
+    const wasExpanded = Object.keys(expandedKeys.value).filter((key) => expandedKeys.value[key])
+    const wasSelected = Object.keys(selectionKeys.value).filter((key) => selectionKeys.value[key])
+    const startedGeneration = generation
+    rootsLoading.value = true
+    let freshRoots: Node[] = []
+    try {
+      freshRoots = await getRoots()
+    } finally {
+      rootsLoading.value = false
+    }
+    if (startedGeneration !== generation) {
+      return
+    }
+    setRoots(freshRoots)
+    const refreshGeneration = generation
+
+    let pending = wasLoaded
+    while (pending.length > 0) {
+      const ready = pending.filter((key) => {
+        const target = findTreeNode(roots.value, key)
+        return target !== null && !target.leaf
+      })
+      if (ready.length === 0) {
+        break
+      }
+      const results = await Promise.all(ready.map((key) => getChildren(Number(key))))
+      if (refreshGeneration !== generation) {
+        return
+      }
+      ready.forEach((key, index) => {
+        const target = findTreeNode(roots.value, key)
+        if (target) {
+          target.children = results[index].map(toTreeNode)
+          target.leaf = results[index].length === 0
+          loadedKeys.value[key] = true
+        }
+      })
+      pending = pending.filter((key) => !ready.includes(key))
+    }
+
+    const nextExpanded: Record<string, boolean> = {}
+    for (const key of wasExpanded) {
+      if (loadedKeys.value[key]) {
+        nextExpanded[key] = true
+      }
+    }
+    expandedKeys.value = nextExpanded
+
+    const nextSelection: Record<string, boolean> = {}
+    for (const key of wasSelected) {
+      if (findTreeNode(roots.value, key) !== null) {
+        nextSelection[key] = true
+      }
+    }
+    selectionKeys.value = nextSelection
+  }
+
   return {
     roots,
     rootsLoading,
@@ -110,5 +174,6 @@ export const useDbTreeStore = defineStore('dbTree', () => {
     setRoots,
     loadRoots,
     loadChildren,
+    refresh,
   }
 })

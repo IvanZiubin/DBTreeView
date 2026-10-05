@@ -83,7 +83,7 @@ function nodeData(node: TreeNode): Node {
         @node-expand="onNodeExpand"
       >
         <template #default="{ node }">
-          <NodeLabel :value="nodeData(node).value" :deleted="nodeData(node).isDeleted" />
+          <NodeLabel :value="nodeData(node).value" :status="nodeData(node).isDeleted ? 'deleted' : 'clean'" />
         </template>
       </Tree>
       <p v-if="!dbTree.rootsLoading && dbTree.roots.length === 0" class="tree-panel__empty">
