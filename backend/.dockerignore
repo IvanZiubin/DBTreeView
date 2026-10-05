@@ -1,0 +1,11 @@
+**/bin/
+**/obj/
+tests/
+.config/
+.vs/
+.vscode/
+.idea/
+**/*.user
+global.json
+Dockerfile
+.dockerignore
