@@ -1,0 +1,123 @@
+# Standard stage flow. Executed by plan-organizer (main session).
+version: 1
+
+orchestrator: plan-organizer
+
+grounding_inputs:
+  - task.md
+  - CLAUDE.md
+  - backend/CLAUDE.md   # from stage 2
+  - frontend/CLAUDE.md  # from stage 2
+  - docs/ai/*.yaml
+
+steps:
+  - id: 1
+    name: ground-and-contract
+    agent: plan-organizer
+    action: >
+      Read grounding inputs, identify current stage in roadmap.yaml, inspect repo state.
+      Write or update docs/ai/api-contract.yaml for the stage.
+    output: docs/ai/api-contract.yaml
+
+  - id: 2
+    name: architect
+    parallel: true
+    dispatch:
+      - agent: backend-architect
+        model: opus
+        effort: medium
+        output: [docs/plans/<stage>-backend.md, docs/plans/<stage>-backend.yaml]
+      - agent: frontend-architect
+        model: opus
+        effort: medium
+        output: [docs/plans/<stage>-frontend.md, docs/plans/<stage>-frontend.yaml]
+
+  - id: 3
+    name: review-and-close-gaps
+    agent: plan-organizer
+    action: >
+      Review both plans against task.md, roadmap DoD and api-contract.yaml. Resolve contract change
+      requests (organizer edits the contract). Close every gap so workers face no open design decisions:
+      exact paths, names, signatures, versions, commands, acceptance criteria. Ensure backend and
+      frontend plans are mutually consistent. Fix plans directly or send back to the architect.
+
+  - id: 4
+    name: commit-plans
+    dispatch:
+      - agent: git-runner
+        model: haiku
+        effort: low
+        paths: [docs/plans/, docs/ai/]
+        message: "docs: <stage> plans"
+
+  - id: 5
+    name: scaffold
+    dispatch:
+      - agent: chore-runner
+        model: haiku
+        effort: low
+        action: Run the prerequisites/scaffold commands listed in each plan yaml.
+
+  - id: 6
+    name: implement
+    parallel: true
+    scoping: one plan-implementer per folder; never two implementers on the same folder
+    dispatch:
+      - agent: plan-implementer
+        model: sonnet
+        effort: medium
+        scope: backend/ (+ root infra files if the backend plan assigns them)
+        plan: docs/plans/<stage>-backend.yaml
+      - agent: plan-implementer
+        model: sonnet
+        effort: medium
+        scope: frontend/
+        plan: docs/plans/<stage>-frontend.yaml
+
+  - id: 7
+    name: verify-and-smoke
+    dispatch:
+      - agent: chore-runner
+        model: haiku
+        effort: low
+        action: Builds, `docker compose up --build -d`, curl smoke checks from plan acceptance criteria.
+
+  - id: 8
+    name: docs-and-tests
+    dispatch:
+      - agent: docs-and-tests
+        model: sonnet
+        effort: low
+        action: Tests covering plan acceptance criteria; update README.md, CLAUDE.md files, docs/ai yaml.
+
+  - id: 9
+    name: final-verification
+    agent: plan-organizer
+    action: >
+      Verify every acceptance criterion and the roadmap definition of done (read code, run tests and
+      smoke). Then dispatch git-runner (haiku/low) for per-folder commits per conventions.yaml
+      (backend/, frontend/, root files separately). Record decisions in CLAUDE.md. Return report.
+
+dispatch_rules:
+  - Every Agent dispatch passes model and effort explicitly, matching the roster in CLAUDE.md.
+  - Dispatch prompts are self-contained: stage, plan file or step ids, folder scope, expected return format.
+  - Workers never receive open design questions; unresolved points go back to the architect or organizer first.
+  - Architects never edit docs/ai/api-contract.yaml; they report contract_changes_requested.
+
+fix_loop:
+  route_to_owner:
+    design_gap: owning architect
+    implementation_bug: plan-implementer for that folder
+    test_or_doc_issue: docs-and-tests
+    command_failure: chore-runner (or the step's owner if the cause is code)
+  max_rounds: 2
+  on_exhaustion: stop and report to the user with the failing criterion, errors and attempts made
+
+return_format:
+  - plan_paths
+  - decisions          # one line each + link
+  - delegation_trail   # agent -> step -> result
+  - commits            # hash + message
+  - files_per_project  # backend / frontend / root
+  - test_and_smoke_results
+  - open_risks

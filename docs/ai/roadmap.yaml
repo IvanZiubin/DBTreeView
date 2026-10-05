@@ -1,0 +1,50 @@
+# Project stages. Each stage follows docs/ai/workflow.yaml.
+version: 1
+
+stages:
+  - id: 1
+    name: agent-setup
+    goal: Multi-agent workflow configured; no application code.
+    definition_of_done:
+      - .claude/agents/ contains plan-organizer, backend-architect, frontend-architect, plan-implementer, docs-and-tests, chore-runner, git-runner
+      - Root CLAUDE.md with stack, roster, docs and git rules, stages, empty Decisions section
+      - docs/ai/workflow.yaml, roadmap.yaml, conventions.yaml exist
+      - docs/plans/.gitkeep exists
+      - Committed as "chore: set up agent workflow (stage 1)"
+
+  - id: 2
+    name: base-structure
+    goal: Runnable skeleton — db + api + ui in docker compose with a seeded tree and a lazy-loading DBTreeView.
+    definition_of_done:
+      - "`docker compose up --build` starts db, api and ui"
+      - UI calls the API; API reads from the seeded DB
+      - Seed data has at least 4 levels of nesting
+      - DBTreeView lazy-loads children on expand (never loads the whole tree)
+      - Reset restores the database to the initial sample data
+      - Backend integration tests (WebApplicationFactory + Testcontainers.PostgreSql) green
+      - backend/CLAUDE.md and frontend/CLAUDE.md created
+
+  - id: 3
+    name: cache-core
+    goal: Local cache with correct hierarchy assembly and a transactional backend Apply endpoint.
+    definition_of_done:
+      - Selected DBTreeView node can be loaded into the cache
+      - CachedTreeView assembles hierarchy correctly for nodes loaded in any order (child before parent, gaps, siblings)
+      - Deleted state is displayed in CachedTreeView
+      - "Backend Apply endpoint: single transactional batch of edits, adds (with temp ids, mapped to real ids in response) and deletes"
+      - Deletes cascade to all descendants, including never-loaded ones
+      - Tests for hierarchy assembly and Apply green
+
+  - id: 4
+    name: cache-pending-changes
+    goal: Full pending-changes workflow in the cache, wired to Apply, with edge cases covered.
+    definition_of_done:
+      - Edit, add child, delete kept in cache only until Apply; cache touches DB only on load and apply
+      - Temp ids for new nodes, including children of new nodes
+      - Delete marks the node and all cached descendants as deleted
+      - Deleted nodes are not editable (no edit/add/delete actions)
+      - Apply wiring, temp-to-real id mapping and cache resync after Apply
+      - "Edge case: node loaded after an ancestor was deleted is shown as deleted"
+      - "Edge case: edits under a deleted ancestor are handled consistently"
+      - Final README.md with one-command start, schema explanation and key decisions
+      - All tests green

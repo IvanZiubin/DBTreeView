@@ -1,0 +1,56 @@
+# Folder ownership, docs and git conventions. Binding for all agents.
+version: 1
+
+folder_ownership:
+  plan-organizer:
+    write: [docs/ai/, docs/plans/ (review fixes only), CLAUDE.md]
+    owns: [docs/ai/api-contract.yaml]
+    never: application code under backend/ or frontend/
+  backend-architect:
+    write: [docs/plans/]
+    plans_for: [backend/, database schema and seed, docker-compose.yml]
+  frontend-architect:
+    write: [docs/plans/]
+    plans_for: [frontend/ (incl. frontend Dockerfile)]
+  plan-implementer:
+    write: the single folder scope given in the dispatch (backend/, frontend/, or root infra files named by the plan)
+  docs-and-tests:
+    write: [test projects and files, README.md, CLAUDE.md, backend/CLAUDE.md, frontend/CLAUDE.md, docs/ai/ (except api-contract.yaml)]
+    never: production logic
+  chore-runner:
+    write: scaffold/install output in the folder it is told; exact-content edits only
+    never: design decisions, logic edits, git
+  git-runner:
+    write: git index and local history only
+    never: file edits
+
+docs:
+  docs_ai:
+    path: docs/ai/
+    format: yaml only
+    purpose: AI context (workflow, roadmap, conventions, api-contract)
+  docs_plans:
+    path: docs/plans/
+    format: pair per plan
+    naming: "<stage>-<project>.md + <stage>-<project>.yaml (project: backend | frontend)"
+    md: human-readable rationale and decision records
+    yaml: ordered steps, files, acceptance criteria — executable literally by a Sonnet worker
+  decisions: one line + link in the Decisions section of root CLAUDE.md
+
+git:
+  scope: local only, current branch only
+  forbidden: [push, branch create/switch/delete, amend, rebase, reset, force]
+  granularity: one commit per phase
+  staging:
+    - backend/ changes in their own commit, staged by folder
+    - frontend/ changes in their own commit, staged by folder
+    - root files (docker-compose.yml, docs, CLAUDE.md, README.md) in their own commit
+    - never git add -A / git add . / commit -a
+  message_prefixes:
+    - feat(api)
+    - feat(ui)
+    - chore(infra)
+    - chore(scaffold)
+    - test(api)
+    - test(ui)
+    - docs
