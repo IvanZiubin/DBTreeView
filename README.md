@@ -4,7 +4,7 @@ Two tree views over a PostgreSQL tree of arbitrary depth: **DBTreeView** lazy-lo
 **CachedTreeView** (stages 3-4) holds individually loaded nodes and keeps edits/adds/deletes pending until **Apply**.
 **Reset** restores the sample data. Spec: [task.md](task.md).
 
-> Status: stage 2 of 4 - DBTreeView, API, seed and Reset work; cache editing arrives in stages 3-4.
+> Status: stage 3 of 4 - DBTreeView, Load into cache with hierarchy assembly, Apply endpoint and Reset work; editing in the cache UI arrives in stage 4.
 
 ## Quick start
 
@@ -20,6 +20,8 @@ docker compose up --build
 
 Prerequisite: Docker. For local development also .NET 8 SDK and Node 22.
 
+Host ports are overridable: `DB_PORT` (default 5432), `API_PORT` (8080), `UI_PORT` (3000), e.g. `API_PORT=18080 docker compose up --build`.
+
 ## Tests
 
 ```bash
@@ -27,6 +29,12 @@ cd backend && dotnet test TreeEditor.sln
 ```
 
 Docker is required: tests start a `postgres:16` container via Testcontainers (random port, so a running compose stack does not conflict). The DB is reset to the seed before every test.
+
+Frontend unit tests (Vitest, pure modules and the Pinia store, no browser):
+
+```bash
+cd frontend && source ~/.nvm/nvm.sh && nvm use 22 >/dev/null && npm test
+```
 
 ## Local development
 
@@ -47,7 +55,24 @@ Full contract: [docs/ai/api-contract.yaml](docs/ai/api-contract.yaml). Errors ar
 | GET | `/api/nodes/{id}/children` | Direct children (404 if node missing) |
 | GET | `/api/nodes/{id}` | Node with `ancestorIds` (root -> parent) (404 if missing) |
 | POST | `/api/reset` | Restore seed, returns roots |
-| POST | `/api/nodes/apply` | Stage 2: returns 501; implemented in stage 3 |
+| POST | `/api/nodes/apply` | Apply a batch of edits / adds / deletes in one transaction |
+
+### Apply
+
+`POST /api/nodes/apply` takes `{edits, adds, deletes, refreshIds?}` and runs everything in one transaction (all or nothing).
+Adds carry client temp ids (`parentId` or `parentTempId`); the response `idMap` maps each temp id to its real id, and `nodes`
+holds the post-apply state of every edited / deleted / created / refresh id. Deletes soft-delete the node and all descendants
+(recursive CTE, also never-loaded ones) and are idempotent. Errors: 400 invalid body (field errors keyed by JSON path, checked
+before any DB access), 404 referenced node missing, 409 edit of / add under an already-deleted node (404 wins over 409).
+
+Concurrency: Apply, Reset and the startup seed take the transaction-scoped advisory lock `pg_advisory_xact_lock(4242)` first,
+so tree writes are serialized and a deleted parent can never gain a live child.
+
+### Cache hierarchy rule (UI)
+
+CachedTreeView stores loaded nodes flat; the tree is derived on every change. A node is shown under its **nearest cached ancestor**
+(from `ancestorIds`); if some ancestors between them are not cached, a muted dashed "..." gap marker with a tooltip lists the
+missing levels. Nodes with no cached ancestor are top-level. Loading a missing parent later re-parents the children automatically.
 
 ## Database schema
 
@@ -79,7 +104,7 @@ Defined in `backend/src/TreeEditor.Api/Data/SeedData.cs`; inserted on startup if
 
 ## Key decisions
 
-- **Soft delete with cascade:** nodes get `is_deleted = true` (also all descendants, including never-loaded ones); deleted nodes are still returned by reads. Cascade arrives in stage 3.
+- **Soft delete with cascade:** nodes get `is_deleted = true` (also all descendants, including never-loaded ones); deleted nodes are still returned by reads. Implemented by Apply (stage 3).
 - **Immutable parent:** a node's parent never changes (enforced by trigger), so ancestry is stable and cache hierarchy assembly is safe.
 - **Same-origin `/api` proxy, no CORS:** nginx (container) and the Vite dev server proxy `/api` to the API; no CORS configuration exists.
 - **Reset semantics:** one transaction: `TRUNCATE ... RESTART IDENTITY`, re-insert the seed with fixed ids, set the sequence so the next id is 31. The client also clears its cache.

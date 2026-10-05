@@ -27,6 +27,7 @@ stages:
 
   - id: 3
     name: cache-core
+    status: done
     goal: Local cache with correct hierarchy assembly and a transactional backend Apply endpoint.
     definition_of_done:
       - Selected DBTreeView node can be loaded into the cache

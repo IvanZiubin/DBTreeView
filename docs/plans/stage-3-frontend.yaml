@@ -811,3 +811,33 @@ organizer_review:   # plan-organizer, stage 3 step 3
     - Placeholder toast removal covered by AC4; frontend/CLAUDE.md update assigned to docs-and-tests.
   closed_gaps:
     - "If S9 fails only because vitest's bundled types need Node globals under tsconfig.app.json, stop and report (do not add @types/node or change tsconfig) - organizer decides."
+
+fix_ui_theme:   # plan-organizer amendment after stage 3 manual browser checks (stage-2 defect, first seen in a browser now)
+  symptom: PrimeVue components render unstyled (native buttons, no tree indentation); injected component CSS contains literal "dt('button.primary.color')".
+  root_cause: >
+    primevue@4.3.3 depends on "@primeuix/styles": "^1.0.0", which resolves to 1.2.5. styles >=1.1 emit the dt('token') CSS syntax
+    that only @primeuix/styled >=0.6 resolves; primevue 4.3.3 core and @primeuix/themes 1.0.3 use @primeuix/styled 0.5.1.
+  fix: Pin @primeuix/styles 1.0.3 as an exact direct dependency plus an npm override (so primevue resolves the same copy); pinned versions stay.
+  runner: chore-runner
+  commands:
+    - id: F1
+      cwd: /Users/maczone/Desktop/personal/test_qit/frontend
+      command: source ~/.nvm/nvm.sh && nvm use 22 >/dev/null && npm pkg set 'overrides.@primeuix/styles=1.0.3' && npm install
+      expect: 'package.json has "overrides": {"@primeuix/styles": "1.0.3"}; exit 0'
+    - id: F2
+      cwd: /Users/maczone/Desktop/personal/test_qit/frontend
+      command: source ~/.nvm/nvm.sh && nvm use 22 >/dev/null && npm ls @primeuix/styles @primeuix/styled
+      expect: '@primeuix/styles@1.0.3 (overridden) and only @primeuix/styled@0.5.1; no 0.7.x'
+    - id: F1b
+      note: Round 2. @primevue/core imports @primeuix/styles/base without declaring it, so the package must be hoisted to top level; the override alone nested it under primevue/.
+      cwd: /Users/maczone/Desktop/personal/test_qit/frontend
+      command: source ~/.nvm/nvm.sh && nvm use 22 >/dev/null && npm install --save-exact @primeuix/styles@1.0.3
+      expect: 'package.json dependencies has "@primeuix/styles": "1.0.3"; overrides entry kept; exit 0'
+    - id: F3
+      cwd: /Users/maczone/Desktop/personal/test_qit/frontend
+      command: test -f node_modules/@primeuix/styles/button/index.mjs && grep -c "dt('" node_modules/@primeuix/styles/button/index.mjs
+      expect: "0 (file exists at top level; exit 1 from grep -c with 0 matches is expected)"
+  acceptance:
+    - npm run build and npm test pass.
+    - In the browser, the "Load into cache" button has the Aura primary background and nested tree rows are indented; no style tag contains "dt('".
+  commit: "fix(ui): pin @primeuix/styles to match primevue 4.3 styled engine"

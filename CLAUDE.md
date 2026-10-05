@@ -68,3 +68,6 @@ Defined with goals and definitions of done in [docs/ai/roadmap.yaml](docs/ai/roa
 <!-- One line per decision + link to its decision record in docs/plans/. Added by plan-organizer. -->
 
 - Tree storage: adjacency list (`nodes.parent_id`, immutable via trigger) + recursive CTEs for ancestors / subtree soft-delete; index `(parent_id, id)` — [decision record](docs/plans/stage-2-backend.md#decision-record-1--tree-storage-model)
+- Writes serialized: Apply, Reset and startup seed take `pg_advisory_xact_lock(4242)` (`DbLocks.TreeWriteLockKey`) as the first statement of their transaction; apply SQL is set-based raw Npgsql — [decision record](docs/plans/stage-3-backend.md#decision-record-4--write-serialization-concurrency)
+- Cache hierarchy: flat node map + pure `buildCacheTree` placing each node under its nearest cached ancestor (scan `ancestorIds` parent→root), gap marker for missing levels; reload refreshes server fields only and keeps pending state; stage 4 apply sends `refreshIds` = every cached real id — [decision records](docs/plans/stage-3-frontend.md)
+- PrimeVue styling: npm override pins `@primeuix/styles` 1.0.3 so component CSS matches the `@primeuix/styled` 0.5 engine used by primevue 4.3.3 — [fix](docs/plans/stage-3-frontend.yaml)
