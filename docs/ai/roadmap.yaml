@@ -62,6 +62,7 @@ stages:
       in:
         - Industry tokens + component classes as the global stylesheet (Barlow / Barlow Condensed, steel accent, square blueprint frames with corner marks)
         - Header bar with brand and Reset; DB and Cache panels as blueprint sections; transfer gutter between them
+        - "Clear cache" button (cache panel toolbar, .btn-secondary) — empties the local cache incl. pending changes and temp ids, client-only (no API call, DB untouched); confirmation dialog when pending changes exist; disabled when the cache is empty or while applying
         - Hairline tree rows (guides per depth, chevrons, leaf dot, '#id', cached marker, state tags new / edited / to delete / deleted)
         - Inline value editor in the cache row (Enter / Escape / blur)
         - Load into cache via button, double-click and drag-and-drop onto the cache panel
@@ -78,6 +79,7 @@ stages:
       - All colors / fonts / spacing come from Industry tokens; PrimeVue Aura look removed or fully overridden (frontend-architect decides and records it)
       - Every stage 2–4 DoD item still holds (lazy DB tree, hierarchy assembly, pending edits / adds / deletes until Apply, cascade, temp-id mapping, Reset)
       - Edit / Add child / Delete disabled for deleted and pending-delete nodes; Apply disabled with no pending changes
+      - Clear cache empties CachedTreeView (and DB-row cached markers / link lines) without any API request; asks for confirmation only when pending changes exist; covered by a store test
       - Drag-and-drop, double-click and button load all go through the single load-node API call
       - Network log lists every API request issued by the UI with status and duration
       - Keyboard focus uses the accent focus-visible ring; layout works down to 1024px wide
