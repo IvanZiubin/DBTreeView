@@ -75,7 +75,7 @@ export const useCacheStore = defineStore('cache', () => {
    * Inserts unknown nodes, refreshes known ones. Refresh overwrites only server fields (parentId, ancestorIds,
    * originalValue, isDeleted, hasChildren) and value only when not isEdited; isNew/isEdited/isPendingDelete are
    * never touched here. Newly inserted nodes are added to expandedKeys. Ends with propagateDeletes over the
-   * whole cache (client_rules.pending_delete_propagation, DR-FE-4.2). Used by loadNode and apply.
+   * whole cache (client_rules.pending_delete_propagation). Used by loadNode and apply.
    */
   function mergeServerNodes(serverNodes: readonly NodeDetails[]): void {
     const inserted: string[] = []
@@ -126,7 +126,7 @@ export const useCacheStore = defineStore('cache', () => {
   }
 
   /**
-   * Sets the trimmed value (DR-FE-4.4). Real node: isEdited = value differs from originalValue. Temp node: value
+   * Sets the trimmed value. Real node: isEdited = value differs from originalValue. Temp node: value
    * only. Returns false (no change) for unknown / effectively deleted nodes, invalid values, or during apply.
    */
   function editValue(id: CacheId, value: string): boolean {
@@ -143,7 +143,7 @@ export const useCacheStore = defineStore('cache', () => {
   }
 
   /**
-   * Adds a temp child `tmp-<n>` under a cached node (DR-FE-4.3); expands parent and child; selects the child.
+   * Adds a temp child `tmp-<n>` under a cached node; expands parent and child; selects the child.
    * Returns the new key, or null (no change) for unknown / effectively deleted parents, invalid values, or during apply.
    */
   function addChild(parentId: CacheId, value: string): string | null {
@@ -189,7 +189,7 @@ export const useCacheStore = defineStore('cache', () => {
   }
 
   /**
-   * Sends all pending changes in one POST /api/nodes/apply (DR-FE-4.6). Returns the applied plan on success, or
+   * Sends all pending changes in one POST /api/nodes/apply. Returns the applied plan on success, or
    * null when nothing was done (no pending changes, already applying, or a Reset happened meanwhile).
    * Throws the ApiError on failure; the cache is then left exactly as it was (client_rules.failure_handling).
    */
@@ -219,8 +219,26 @@ export const useCacheStore = defineStore('cache', () => {
   }
 
   /**
+   * Recovers from an Apply 409 (stale cache: the nodes were deleted by another client). Marks the cached ids as
+   * deleted and runs propagateDeletes, which discards their pending edits / deletes and drops their temp children,
+   * so the next Apply sends only the changes that are still valid. Returns the keys that were cached.
+   */
+  function markDeletedInDb(ids: readonly number[]): string[] {
+    const marked: string[] = []
+    for (const id of ids) {
+      const node = nodes.value[cacheKey(id)]
+      if (node) {
+        node.isDeleted = true
+        marked.push(cacheKey(id))
+      }
+    }
+    propagateDeletes(nodes.value)
+    return marked
+  }
+
+  /**
    * Empties the cache incl. pending changes and temp ids and starts a new epoch. Client-only: no API call
-   * (used by Reset and by the Clear cache button, DR-FE-5.6).
+   * (used by Reset and by the Clear cache button).
    */
   function clear(): void {
     nodes.value = {}
@@ -254,6 +272,7 @@ export const useCacheStore = defineStore('cache', () => {
     addChild,
     deleteNode,
     apply,
+    markDeletedInDb,
     clear,
   }
 })

@@ -49,6 +49,8 @@ export interface ProblemDetails {
   detail?: string
   instance?: string
   errors?: Record<string, string[]>
+  /** Apply 404 / 409: the offending node ids. */
+  nodeIds?: number[]
 }
 
 /** GET /api/health 200 body. */

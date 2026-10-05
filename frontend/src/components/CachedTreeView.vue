@@ -4,6 +4,7 @@ import { Check, ChevronRight, Download, Eraser, Pencil, Plus, Trash } from 'luci
 import BlueprintCorners from './BlueprintCorners.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import StatusTags from './StatusTags.vue'
+import { ApiError } from '../api/client'
 import { gapTooltip } from '../cache/hierarchy'
 import { buildApplyPlan, describeApplyPlan, validateValue, type ApplyPlan } from '../cache/pending'
 import { reportError } from '../errors'
@@ -32,7 +33,7 @@ import {
   type CacheRow,
 } from '../view/treeRows'
 
-/** Value of a node created by Add child before the user types (mock behaviour, DR-FE-5.8). */
+/** Value of a node created by Add child before the user types (mock behaviour). */
 const NEW_NODE_VALUE = 'New node'
 const CACHE_ROW_ATTR = 'data-cache-row'
 const MODIFY_REJECTED = 'The node can no longer be modified (it is deleted or an apply is running).'
@@ -186,7 +187,11 @@ async function confirmApply(): Promise<void> {
   try {
     plan = await cache.apply()
   } catch (err) {
-    reportError(err)
+    if (err instanceof ApiError && err.status === 409 && err.problem?.nodeIds) {
+      await recoverFromConflict(err.problem.nodeIds)
+    } else {
+      reportError(err)
+    }
     return
   }
   if (plan === null) {
@@ -213,7 +218,35 @@ async function confirmApply(): Promise<void> {
   }
 }
 
-/** Clear cache (DR-FE-5.6): disabled when empty / applying; confirm only when pending changes would be lost. */
+/**
+ * Apply 409: the nodes were deleted by another client, nothing was saved. Mark them deleted in the cache (their
+ * pending changes are discarded, the rest stay pending) and refresh the DB tree so the user can review and re-apply.
+ */
+async function recoverFromConflict(nodeIds: readonly number[]): Promise<void> {
+  const marked = cache.markDeletedInDb(nodeIds)
+  const flashes: Record<string, string> = {}
+  for (const key of marked) {
+    flashes[`c:${key}`] = 'deleted elsewhere'
+  }
+  highlight.flashKeys(flashes)
+  const ids = nodeIds.map((id) => `#${id}`).join(', ')
+  const rest = cache.hasPendingChanges
+    ? 'Your other changes are still pending — review them and apply again.'
+    : 'No other changes are pending.'
+  toasts.show({
+    severity: 'warn',
+    summary: 'Nothing was saved',
+    detail: `${ids} ${nodeIds.length === 1 ? 'was' : 'were'} deleted by someone else; changes to ${nodeIds.length === 1 ? 'it' : 'them'} were discarded. ${rest}`,
+    lifeMs: 8000,
+  })
+  try {
+    await dbTree.refresh()
+  } catch (err) {
+    reportError(err)
+  }
+}
+
+/** Clear cache: disabled when empty / applying; confirm only when pending changes would be lost. */
 function onClearClick(): void {
   cancelEdit()
   const decision = clearDecision.value
@@ -264,7 +297,7 @@ function onDragLeave(event: DragEvent): void {
   dragOver.value = false
 }
 
-/** Drop of a dragged DB row: the same single load path as the button and double-click (DR-FE-5.7). */
+/** Drop of a dragged DB row: the same single load path as the button and double-click. */
 function onDrop(event: DragEvent): void {
   const drag = transfer.drag
   if (drag === null) {
@@ -276,7 +309,7 @@ function onDrop(event: DragEvent): void {
   void transfer.loadIntoCache(drag.id, drag.label)
 }
 
-/** FLIP + fly-in (DR-FE-5.11): rects captured before every row-list change, animated after the DOM update. */
+/** FLIP + fly-in: rects captured before every row-list change, animated after the DOM update. */
 const rowSignature = computed<string>(() => rows.value.map((row) => `${row.key}/${row.depth}`).join('|'))
 let flipBefore: Map<string, DOMRect> | null = null
 let playedFlightSeq = 0
