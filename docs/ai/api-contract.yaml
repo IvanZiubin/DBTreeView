@@ -1,0 +1,169 @@
+# HTTP contract between backend (backend/) and frontend (frontend/). Owned by plan-organizer.
+# Architects/implementers never edit this file; they report contract_changes_requested.
+version: 1
+stage_introduced: 2
+
+base_url:
+  api_direct: http://localhost:8080        # api container, published port
+  via_ui: http://localhost:3000/api        # nginx in ui container proxies /api/* -> http://api:8080/api/*
+  dev: Vite dev server proxies /api -> http://localhost:8080 (same paths)
+  note: All paths below are absolute and already include the /api prefix. No CORS — browser always talks same-origin.
+
+conventions:
+  content_type: application/json; charset=utf-8
+  json_casing: camelCase
+  ids: >
+    Real node ids are 64-bit integers (PostgreSQL bigint, C# long, TS number). Ids are server-generated.
+    Seed ids are fixed and deterministic (1..N in seed order); after Reset the id sequence restarts at N+1.
+  temp_ids: >
+    Client-generated string ids for nodes added in the cache and not yet applied. Format "tmp-<n>" (any
+    non-empty string up to 64 chars is accepted). Unique within one apply request. Never sent as a path id.
+  ordering: Lists of nodes (roots, children) are ordered by id ascending.
+  soft_delete: >
+    Nodes are never physically removed (except by Reset). Deleting sets isDeleted=true on the node and on
+    ALL its descendants in the DB, including ones never loaded by any client. Deleted nodes are still
+    returned by every read endpoint, with isDeleted=true. Parent–child relations never change.
+  value_rules: value is a string; trimmed by the server; length after trim 1..200; otherwise 400.
+  errors: >
+    Every non-2xx response body is RFC 7807 ProblemDetails (application/problem+json) with at least
+    type, title, status; detail where useful. Validation failures use ValidationProblemDetails
+    (extra "errors" map: field -> string[]). Unhandled exceptions -> 500 ProblemDetails (no stack trace).
+
+schemas:
+  Node:
+    type: object
+    required: [id, parentId, value, isDeleted, hasChildren]
+    properties:
+      id: { type: integer, format: int64 }
+      parentId: { type: integer, format: int64, nullable: true, description: null for a root }
+      value: { type: string }
+      isDeleted: { type: boolean }
+      hasChildren: { type: boolean, description: "true if at least one child row exists (deleted children count)" }
+
+  NodeDetails:
+    description: Node plus ancestry, used by the cache to place individually loaded nodes in the hierarchy.
+    allOf: [Node]
+    required: [ancestorIds]
+    properties:
+      ancestorIds:
+        type: array
+        items: { type: integer, format: int64 }
+        description: "Ids of all ancestors ordered root -> parent. Empty array for a root. Last element == parentId."
+
+  ApplyRequest:
+    type: object
+    required: [edits, adds, deletes]
+    properties:
+      edits:
+        type: array
+        items:
+          type: object
+          required: [id, value]
+          properties:
+            id: { type: integer, format: int64 }
+            value: { type: string }
+      adds:
+        type: array
+        description: >
+          New nodes. Exactly one of parentId / parentTempId must be set. parentTempId must reference the
+          tempId of another entry in this same adds array (children of new nodes). Order in the array is
+          irrelevant; the server resolves dependencies. Cycles or unknown parentTempId -> 400.
+        items:
+          type: object
+          required: [tempId, value]
+          properties:
+            tempId: { type: string }
+            parentId: { type: integer, format: int64, nullable: true }
+            parentTempId: { type: string, nullable: true }
+            value: { type: string }
+      deletes:
+        type: array
+        description: Real ids to soft-delete together with all their DB descendants. Temp nodes are never sent here (client drops them).
+        items: { type: integer, format: int64 }
+      refreshIds:
+        type: array
+        description: Optional. Real ids currently held by the cache; their post-apply state is included in the response.
+        items: { type: integer, format: int64 }
+
+  ApplyResponse:
+    type: object
+    required: [idMap, nodes]
+    properties:
+      idMap:
+        type: object
+        additionalProperties: { type: integer, format: int64 }
+        description: tempId -> newly assigned real id, one entry per adds item.
+      nodes:
+        type: array
+        items: { $ref: NodeDetails }
+        description: >
+          Post-apply state of every node referenced by the request (edits ids, deletes ids, created nodes,
+          refreshIds), de-duplicated, ordered by id. Nodes deleted by cascade that are in refreshIds come
+          back with isDeleted=true.
+
+apply_semantics:
+  atomic: The whole request runs in one DB transaction; any error -> rollback, nothing persisted.
+  order_of_operations: [adds (parents before children), edits, deletes with cascade]
+  same_batch_rule: >
+    Adds/edits targeting nodes that this same request deletes (directly or by cascade) are allowed;
+    because deletes run last, those nodes end up deleted. Their ids still appear in idMap/nodes.
+  conflicts: >
+    Editing a node, adding under a parent, or deleting a node that is ALREADY deleted in the DB before
+    the request -> 409. Exception: deleting an already-deleted node is idempotent (no error).
+  not_found: Any referenced real id (edits, deletes, parentId) that does not exist -> 404, rollback.
+  empty_request: All arrays empty -> 200 with empty idMap and nodes for refreshIds only.
+
+endpoints:
+  - id: health
+    method: GET
+    path: /api/health
+    description: Liveness + DB connectivity.
+    responses:
+      200: { body: '{ "status": "ok" }' }
+      503: { body: ProblemDetails, when: database unreachable }
+
+  - id: get-roots
+    method: GET
+    path: /api/nodes/roots
+    responses:
+      200: { body: "Node[]" }
+
+  - id: get-children
+    method: GET
+    path: /api/nodes/{id}/children
+    description: Direct children only (one level). Used by DBTreeView lazy expand.
+    params: { id: int64 }
+    responses:
+      200: { body: "Node[] (empty array if no children)" }
+      404: { body: ProblemDetails, when: node id does not exist }
+
+  - id: get-node
+    method: GET
+    path: /api/nodes/{id}
+    description: Single node with ancestorIds. Used when loading a node into the cache.
+    params: { id: int64 }
+    responses:
+      200: { body: NodeDetails }
+      404: { body: ProblemDetails, when: node id does not exist }
+
+  - id: reset
+    method: POST
+    path: /api/reset
+    description: >
+      Restore the DB to the initial seed in one transaction (delete all rows, re-insert seed with its fixed
+      ids, restart the id sequence after the max seed id). Client must also clear its cache.
+    request: no body
+    responses:
+      200: { body: "Node[] — the roots after reset" }
+
+  - id: apply
+    method: POST
+    path: /api/nodes/apply
+    description: Apply pending cache changes. Stage 2 ships the route only and returns 501; implemented in stage 3.
+    request: { body: ApplyRequest }
+    responses:
+      200: { body: ApplyResponse, since_stage: 3 }
+      400: { body: ValidationProblemDetails, when: invalid value, missing/both parent refs, unknown parentTempId, duplicate tempId, cycle, since_stage: 3 }
+      404: { body: ProblemDetails, when: referenced real id missing, since_stage: 3 }
+      409: { body: ProblemDetails, when: target already deleted before the request, since_stage: 3 }
+      501: { body: ProblemDetails, title: "Not Implemented", stage_2_only: true }

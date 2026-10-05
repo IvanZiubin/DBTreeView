@@ -66,3 +66,5 @@ Defined with goals and definitions of done in [docs/ai/roadmap.yaml](docs/ai/roa
 ## Decisions
 
 <!-- One line per decision + link to its decision record in docs/plans/. Added by plan-organizer. -->
+
+- Tree storage: adjacency list (`nodes.parent_id`, immutable via trigger) + recursive CTEs for ancestors / subtree soft-delete; index `(parent_id, id)` — [decision record](docs/plans/stage-2-backend.md#decision-record-1--tree-storage-model)
