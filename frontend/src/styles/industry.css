@@ -1,4 +1,4 @@
-/* Industry design system: verbatim port of docs/design/stage-5/industry-styles.css from line 3 on (the Google Fonts import rule is replaced by link tags in frontend/index.html). Do not edit by hand; re-port from docs/design/ instead. See docs/plans/stage-5-frontend.md DR-FE-5.2. */
+/* Industry design system: verbatim port of docs/design/stage-5/industry-styles.css from line 3 on (the Google Fonts import rule is replaced by the self-hosted @font-face rules in fonts.css). Do not edit by hand; re-port from docs/design/ instead. */
 
 :root {
   --color-bg: #f2f2f3;

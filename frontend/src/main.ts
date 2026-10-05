@@ -1,5 +1,6 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
+import './styles/fonts.css'
 import './styles/industry.css'
 import './styles/app.css'
 import App from './App.vue'
@@ -11,7 +12,7 @@ const app = createApp(App)
 const pinia = createPinia()
 app.use(pinia)
 
-// Every API call goes through src/api/client.ts, which reports it to the network log (DR-FE-5.5). Registered before
+// Every API call goes through src/api/client.ts, which reports it to the network log. Registered before
 // mount so the initial GET /api/nodes/roots is logged too.
 const networkLog = useNetworkLogStore(pinia)
 setRequestObserver({
