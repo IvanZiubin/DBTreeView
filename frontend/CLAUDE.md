@@ -16,9 +16,10 @@ Production image: `Dockerfile` builds with Node and serves via nginx (`nginx.con
 ## Layout
 
 - `src/api/client.ts`, `src/api/types.ts` - the only place that calls `fetch`; DTO types matching `docs/ai/api-contract.yaml`.
-- `src/stores/dbTree.ts` - DBTreeView state (lazy loading); `src/stores/cache.ts` - cache store (load, refresh, hierarchy, expansion, `realIds`; edit/add/delete/apply are stubs until stage 4).
-- `src/cache/model.ts`, `src/cache/hierarchy.ts` - pure cache model and hierarchy assembly (no Vue/Pinia imports); tests next to them (`*.test.ts`, also `src/stores/cache.test.ts`).
-- `src/components/` - `AppHeader`, `DbTreeView`, `CachedTreeView`, `NodeLabel`.
+- `src/stores/dbTree.ts` - DBTreeView state (lazy loading) and `refresh()`, used after Apply; `src/stores/cache.ts` - cache store: load, refresh, hierarchy, expansion, pending edit/add/delete, apply.
+- `src/cache/model.ts`, `src/cache/hierarchy.ts`, `src/cache/pending.ts` - pure cache model, hierarchy assembly and pending-change logic (validateValue, propagateDeletes, nodeStatus, buildApplyPlan, settleApplied, re-key helpers); no Vue/Pinia imports.
+- Tests: `src/cache/hierarchy.test.ts`, `src/cache/pending.test.ts`, `src/stores/cache.test.ts`, `src/stores/cache.pending.test.ts`, `src/stores/dbTree.test.ts`, `src/dependencyPins.test.ts`.
+- `src/components/` - `AppHeader`, `DbTreeView`, `CachedTreeView`, `NodeLabel`, `NodeValueDialog` (Edit / Add child dialog).
 - `src/errors.ts`, `src/App.vue`, `src/main.ts`.
 
 ## Conventions
@@ -29,4 +30,9 @@ Production image: `Dockerfile` builds with Node and serves via nginx (`nginx.con
 - Never add CORS headers/config: browser is same-origin (nginx or Vite proxy).
 - Do not change `package.json` dependencies/scripts or `tsconfig*.json` without a plan.
 - Hierarchy is derived by `buildCacheTree`, never stored: the store keeps a flat map of nodes; each node displays under its nearest cached ancestor, with a gap marker for uncached levels.
-- Design decisions: [docs/plans/stage-3-frontend.md](../docs/plans/stage-3-frontend.md), [docs/plans/stage-2-frontend.md](../docs/plans/stage-2-frontend.md).
+- Pending-change rules live in `src/cache/pending.ts` (pure); the store only orchestrates. `propagateDeletes` must run after every merge and every delete.
+- Apply always sends `refreshIds` = every cached real id (client_rules.refresh_ids); on failure the cache state must stay untouched; on success: settle -> re-key -> `mergeServerNodes`, in that order.
+- Temp ids are `tmp-<n>` from `nextTempSeq`; real ids are opaque (only from idMap / server) and may have gaps - never compute ids.
+- Edit / Add child / Delete are disabled and rejected for effectively deleted nodes (`isDeleted || isPendingDelete` or such a cached ancestor) and while applying.
+- primevue 4.3.3 + @primeuix/themes 1.0.3 + @primeuix/styles 1.0.3 (dependencies AND overrides) are pinned together; `src/dependencyPins.test.ts` fails if they drift - upgrade only together, via a plan.
+- Design decisions: [docs/plans/stage-4-frontend.md](../docs/plans/stage-4-frontend.md), [docs/plans/stage-3-frontend.md](../docs/plans/stage-3-frontend.md), [docs/plans/stage-2-frontend.md](../docs/plans/stage-2-frontend.md).

@@ -32,3 +32,5 @@
 - `POST /api/nodes/apply` is fully implemented (no 501). 404/409 bodies carry a sorted `nodeIds` extension.
 - Compose host ports are overridable: `DB_PORT` (5432), `API_PORT` (8080), `UI_PORT` (3000).
 - Apply tests: `tests/TreeEditor.Api.Tests/Apply/*.cs` per `test_matrix` in `docs/plans/stage-3-backend.yaml`; helpers in `Infrastructure/ApplyHttp.cs`. The atomicity test installs and drops its own trigger (Reset does not remove triggers).
+- Stage 4 made no production backend change. Stage-4 client-flow tests live in tests/TreeEditor.Api.Tests/Apply/ApplyClientFlowTests.cs (requests shaped per api-contract client_rules); see test_matrix in docs/plans/stage-4-backend.yaml.
+- Ids: identity sequence; 400/404/409 consume no ids (nextval runs after the 404/409 checks); a 500 after allocation leaves a sequence gap (tested in ApplyAtomicityTests); ids are reused only across Reset (restart at 31).
